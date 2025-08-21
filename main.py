@@ -9,7 +9,17 @@
 
 
 from PyQt5 import QtCore, QtGui, QtWidgets
+import subprocess, os, sys   # add sys here
+import importlib.util
 
+def _diagnose_env(parent=None, title="Python Env"):
+    spec = importlib.util.find_spec("napari")
+    QtWidgets.QMessageBox.information(
+            parent, title,
+            f"PYTHON: {sys.executable}\n"
+            f"napari found: {spec is not None}\n"
+            f"napari spec: {spec}\n"
+    )
 
 class Ui_Dialog(object):
     def setupUi(self, Dialog):
@@ -107,18 +117,72 @@ class Ui_Dialog(object):
         self.tabWidget.addTab(self.tab_6, "")
 
         self.pushButton.clicked.connect(self.browse_directory)
+        self.pushButton_2.clicked.connect(self.run_convert)
+        self.pushButton_6.clicked.connect(self.show_recommendation)
 
         self.retranslateUi(Dialog)
         self.tabWidget.setCurrentIndex(0)
         self.tabWidget_2.setCurrentIndex(0)
         QtCore.QMetaObject.connectSlotsByName(Dialog)
 
+        self._rec_win = None
+        self._rec_ui  = None
+
     def browse_directory(self):
-        # open directory dialog
         directory = QtWidgets.QFileDialog.getExistingDirectory(None, "Select Folder", "")
-        if directory:  # if user selected a directory
-            self.lineEdit.setText(directory)    
-    
+        if directory:
+            self.lineEdit.setText(directory)
+
+    def run_convert(self):
+        directory = self.lineEdit.text().strip()
+        print('test')
+        if not directory or not os.path.isdir(directory):
+            QtWidgets.QMessageBox.warning(None, "Error", "Please select a valid directory first.")
+            return
+
+        try:
+            # Jalankan dcmodify di dalam folder
+            subprocess.run(
+                ["dcmodify", "-nb", "-gin", "-i", "(0020,0010)=STUDY123", "-i", "(0020,0011)=1", "*."],
+                cwd=directory,
+                shell=True,
+                check=True
+            )
+
+            # Jalankan dcmmkdir di dalam folder
+            subprocess.run(
+                ["dcmmkdir", "--recurse"],
+                cwd=directory,
+                shell=True,
+                check=True
+            )
+
+            QtWidgets.QMessageBox.information(None, "Success", "Conversion finished successfully!")
+
+        except subprocess.CalledProcessError as e:
+            QtWidgets.QMessageBox.critical(None, "Error", f"Command failed:\n{e}")
+
+    def show_recommendation(self):
+        try:
+            # Ensure backend selection (napari reads this during import)
+            os.environ.setdefault("QT_API", "pyqt5")
+            os.environ.setdefault("VISPY_USE_APP", "pyqt5")
+            # os.environ.setdefault("QT_OPENGL", "software")  # optional
+
+            from recommendation import Ui_MainWindow
+            self._rec_win = QtWidgets.QMainWindow()
+            self._rec_ui = Ui_MainWindow()
+            self._rec_ui.setupUi(self._rec_win)
+            self._rec_win.setWindowTitle("Recommendation + Napari")
+            self._rec_win.show()
+        except Exception as e:
+            import traceback
+            QtWidgets.QMessageBox.critical(
+                None, "Error",
+                "Failed to open recommendation window:\n\n"
+                + "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            )
+
     def retranslateUi(self, Dialog):
         _translate = QtCore.QCoreApplication.translate
         Dialog.setWindowTitle(_translate("Dialog", "Dialog"))

@@ -2,9 +2,29 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 import napari
 import numpy as np
+import traceback
+import os
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
+        # Choose PyQt5 + VisPy backend BEFORE napari import
+        os.environ.setdefault("QT_API", "pyqt5")
+        os.environ.setdefault("VISPY_USE_APP", "pyqt5")
+        # If your OpenGL/driver is finicky, you can try software fallback:
+        # os.environ.setdefault("QT_OPENGL", "software")
+
+        # Now import napari lazily (so it uses the env we just set)
+        try:
+            import napari
+        except Exception as e:
+            msg = QtWidgets.QMessageBox(MainWindow)
+            msg.setIcon(QtWidgets.QMessageBox.Critical)
+            msg.setWindowTitle("Napari Import Error")
+            msg.setText("Failed to import napari.")
+            msg.setDetailedText("".join(traceback.format_exception(type(e), e, e.__traceback__)))
+            msg.exec_()
+            return
+        
         MainWindow.setObjectName("MainWindow")
         MainWindow.resize(1100, 600)
 
@@ -63,10 +83,10 @@ class Ui_MainWindow(object):
         # layer.colormap = "viridis"; layer.blending = "additive"; layer.contrast_limits = (50, 200)
 
 if __name__ == "__main__":
-    import sys, os
-    # Ensure napari uses PyQt5 (QtPy picks this up); usually not needed, but safe:
+    import sys
     os.environ.setdefault("QT_API", "pyqt5")
-
+    os.environ.setdefault("VISPY_USE_APP", "pyqt5")
+    # os.environ.setdefault("QT_OPENGL", "software")  # optional
     app = QtWidgets.QApplication(sys.argv)
     MainWindow = QtWidgets.QMainWindow()
     ui = Ui_MainWindow()
