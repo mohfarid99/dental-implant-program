@@ -119,6 +119,7 @@ class Ui_Dialog(object):
         self.pushButton.clicked.connect(self.browse_directory)
         self.pushButton_2.clicked.connect(self.run_convert)
         self.pushButton_6.clicked.connect(self.show_recommendation)
+        self.pushButton_4.clicked.connect(self.open_ian_tool)
 
         self.retranslateUi(Dialog)
         self.tabWidget.setCurrentIndex(0)
@@ -182,6 +183,22 @@ class Ui_Dialog(object):
                 "Failed to open recommendation window:\n\n"
                 + "".join(traceback.format_exception(type(e), e, e.__traceback__))
             )
+
+    def open_ian_tool(self):
+        # Full path to the EXE (use raw string to avoid escaping backslashes)
+        exe_path = r"C:\Users\user\Documents\[Exe-Only] IAN Annotation Tools Work\exe.win-amd64-3.7\IAN Annotation Tool.exe"
+
+        if not os.path.isfile(exe_path):
+            QtWidgets.QMessageBox.warning(None, "Not found",
+                                        f"Executable not found:\n{exe_path}")
+            return
+        try:
+            # Launch the app; set cwd to the EXE folder (some apps need it)
+            subprocess.Popen([exe_path], cwd=os.path.dirname(exe_path))
+            # If you prefer: os.startfile(exe_path)  # (no cwd control)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(None, "Launch failed", str(e))
+
 
     def retranslateUi(self, Dialog):
         _translate = QtCore.QCoreApplication.translate
