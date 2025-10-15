@@ -14,6 +14,11 @@ main9.py
 - Reset View reloads side_volume.npy (original)
 - Auto classification: loads classification.pt (EfficientNet-B0 2-logit with 2.5D input)
   to pick lowest & highest indices predicted as class 0 ("missing")
+
+- NEW on Tab index 4 ("Dental Implant Database"):
+  * CSV-backed table (implant_database.csv next to this script)
+  * Add / Update / Delete rows (ID, Diameter(mm), Height(mm))
+  * Click row to edit; ID must be unique
 """
 from PyQt5 import QtCore, QtGui, QtWidgets
 import subprocess, os, sys, importlib.util
@@ -232,16 +237,69 @@ class Ui_Dialog(object):
         self.tabWidget.addTab(self.tab_5, "")
 
         # ----------------------------
-        # TAB 5: Dental Implant Database
+        # TAB 5: Dental Implant Database (CRUD + CSV)
         # ----------------------------
         self.tab_6 = QtWidgets.QWidget()
         self.tab_6.setObjectName("tab_6")
+
+        # Top form
+        form = QtWidgets.QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+
+        self.label = QtWidgets.QLabel(self.tab_6); self.label.setText("ID")
+        self.label_2 = QtWidgets.QLabel(self.tab_6); self.label_2.setText("Diameter (mm)")
+        self.label_3 = QtWidgets.QLabel(self.tab_6); self.label_3.setText("Height (mm)")
+
+        self.edId = QtWidgets.QLineEdit(self.tab_6); self.edId.setPlaceholderText("Model Number (unique)")
+        self.edDia = QtWidgets.QLineEdit(self.tab_6); self.edDia.setPlaceholderText("e.g. 4.5")
+        self.edHgt = QtWidgets.QLineEdit(self.tab_6); self.edHgt.setPlaceholderText("e.g. 11.5")
+
+        # numeric validators for dia/height
+        dbl = QtGui.QDoubleValidator(0.0, 100.0, 2, self.tab_6)
+        dbl.setNotation(QtGui.QDoubleValidator.StandardNotation)
+        self.edDia.setValidator(dbl)
+        self.edHgt.setValidator(dbl)
+
+        form.addWidget(self.label,   0, 0)
+        form.addWidget(self.edId,    0, 1)
+        form.addWidget(self.label_2, 1, 0)
+        form.addWidget(self.edDia,   1, 1)
+        form.addWidget(self.label_3, 2, 0)
+        form.addWidget(self.edHgt,   2, 1)
+
+        # Buttons
+        btnRow = QtWidgets.QHBoxLayout()
+        self.btnAdd = QtWidgets.QPushButton("Add")
+        self.btnUpdate = QtWidgets.QPushButton("Update")
+        self.btnDelete = QtWidgets.QPushButton("Delete")
+        self.btnSave = QtWidgets.QPushButton("Save CSV")
+        self.btnLoad = QtWidgets.QPushButton("Reload CSV")
+        btnRow.addWidget(self.btnAdd)
+        btnRow.addWidget(self.btnUpdate)
+        btnRow.addWidget(self.btnDelete)
+        btnRow.addStretch(1)
+        btnRow.addWidget(self.btnLoad)
+        btnRow.addWidget(self.btnSave)
+
+        # Table
         self.tableView = QtWidgets.QTableView(self.tab_6)
-        self.tableView.setGeometry(QtCore.QRect(40, 160, 760, 230))
-        self.tableView.setObjectName("tableView")
-        self.label = QtWidgets.QLabel(self.tab_6); self.label.setGeometry(QtCore.QRect(50, 24, 120, 20)); self.label.setText("ID")
-        self.label_2 = QtWidgets.QLabel(self.tab_6); self.label_2.setGeometry(QtCore.QRect(50, 64, 120, 20)); self.label_2.setText("Diameter (mm)")
-        self.label_3 = QtWidgets.QLabel(self.tab_6); self.label_3.setGeometry(QtCore.QRect(50, 104, 120, 20)); self.label_3.setText("Height (mm)")
+        self.tableView.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tableView.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tableView.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tableView.horizontalHeader().setStretchLastSection(True)
+
+        # Model
+        self._db_model = QtGui.QStandardItemModel(self.tableView)
+        self._db_model.setHorizontalHeaderLabels(["ID", "Diameter (mm)", "Height (mm)"])
+        self.tableView.setModel(self._db_model)
+
+        # Layout composition
+        v6 = QtWidgets.QVBoxLayout(self.tab_6)
+        v6.addLayout(form)
+        v6.addLayout(btnRow)
+        v6.addWidget(self.tableView)
+
         self.tabWidget.addTab(self.tab_6, "")
 
         # ----------------------------
@@ -285,6 +343,17 @@ class Ui_Dialog(object):
         # Missing teeth slice handlers
         self.btnSetMissingSlice.clicked.connect(self._set_missing_slice_manual)
         self.btnGetMissingAuto.clicked.connect(self._get_missing_slice_automatically)
+
+        # DB signals
+        self.btnAdd.clicked.connect(self._db_add_row)
+        self.btnUpdate.clicked.connect(self._db_update_row)
+        self.btnDelete.clicked.connect(self._db_delete_selected)
+        self.btnSave.clicked.connect(self._db_save_csv)
+        self.btnLoad.clicked.connect(self._db_load_csv)
+        self.tableView.selectionModel().selectionChanged.connect(self._db_on_selection)
+
+        # Load DB at startup (creates CSV with defaults if missing)
+        self._db_load_csv()
 
         self.retranslateUi(Dialog)
         self.tabWidget.setCurrentIndex(0)
@@ -439,8 +508,6 @@ class Ui_Dialog(object):
                     if mode in ("attenuated_mip", "mip", "translucent", "additive", "iso"):
                         lyr.rendering = mode
                 elif isinstance(lyr, napari.layers.Labels):
-                    # Ensure labels keep a safe rendering; do NOT set to 'mip'
-                    # Optional: normalize to a valid labels rendering if needed
                     if getattr(lyr, "rendering", None) not in ("translucent", "iso"):
                         try:
                             lyr.rendering = "translucent"
@@ -448,7 +515,6 @@ class Ui_Dialog(object):
                             pass
                 # Shapes layers don't have volume rendering at all; ignore them
             except Exception:
-                # Don't let one failing layer break the whole UI
                 continue
 
     def _reset_view(self):
@@ -662,17 +728,15 @@ class Ui_Dialog(object):
                 coords_zyx = np.concatenate([zcol, rect_yx], axis=1)  # (z, y, x)
                 shapes.append(coords_zyx)
 
-            # Solution #3: use path (polyline) instead of polygon (mesh), and disable picking/editing
+            # solution 3: thin polylines, not polygons; disable picking
             self._boundary_layer = self.viewer.add_shapes(
                 shapes,
-                shape_type="path",            # path = thin polyline (no mesh)
+                shape_type="path",
                 edge_color="red",
-                edge_width=1,                 # thinner red line
+                edge_width=1,
                 face_color="transparent",
                 name="Missing Slice Boundaries",
             )
-
-            # Disable pick/edit to avoid vispy pick-mesh crashes
             try:
                 if hasattr(self._boundary_layer, "selectable"):
                     self._boundary_layer.selectable = False
@@ -947,6 +1011,204 @@ class Ui_Dialog(object):
         self.txtMissingStart.setText(str(start_idx))
         self.txtMissingEnd.setText(str(end_idx))
         self._set_missing_slice_manual()
+
+    # ----------------------------
+    # CSV-backed Implant Database (Tab index 4)
+    # ----------------------------
+    def _db_csv_path(self):
+        try:
+            base = os.path.dirname(os.path.abspath(sys.argv[0]))
+        except Exception:
+            base = os.getcwd()
+        return os.path.join(base, "implant_database.csv")
+
+    def _db_set_rows(self, rows):
+        """rows: list of (id, dia, hgt) strings/floats"""
+        self._db_model.removeRows(0, self._db_model.rowCount())
+        for rid, dia, hgt in rows:
+            it_id = QtGui.QStandardItem(str(rid))
+            it_d  = QtGui.QStandardItem(f"{float(dia):g}")
+            it_h  = QtGui.QStandardItem(f"{float(hgt):g}")
+            for it in (it_id, it_d, it_h):
+                it.setEditable(False)
+            self._db_model.appendRow([it_id, it_d, it_h])
+        self.tableView.resizeColumnsToContents()
+
+    def _db_get_rows(self):
+        rows = []
+        for r in range(self._db_model.rowCount()):
+            rid = self._db_model.item(r, 0).text().strip()
+            dia = float(self._db_model.item(r, 1).text())
+            hgt = float(self._db_model.item(r, 2).text())
+            rows.append((rid, dia, hgt))
+        return rows
+
+    def _db_load_csv(self):
+        path = self._db_csv_path()
+        rows = []
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.lower().startswith("id,"):
+                            continue
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) >= 3:
+                            rid, d, h = parts[0], float(parts[1]), float(parts[2])
+                            rows.append((rid, d, h))
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(None, "CSV", f"Failed to read CSV:\n{e}")
+        else:
+            # Seed with initial database (parsed from your table image)
+            rows = [
+                # --- GS series ---
+                ("GS2M35080", 3.5, 8.5),
+                ("GS2M35100", 3.5, 10),
+                ("GS2M35110", 3.5, 11.5),
+                ("GS2M35130", 3.5, 13),
+                ("GS2M35150", 3.5, 15),
+                ("GS2R40070", 4.0, 7),
+                ("GS2R40080", 4.0, 8.5),
+                ("GS2R40100", 4.0, 10),
+                ("GS2R40110", 4.0, 11.5),
+                ("GS2R40130", 4.0, 13),
+                ("GS2R40150", 4.0, 15),
+                ("GS2W45070", 4.5, 7),
+                ("GS2W45080", 4.5, 8.5),
+                ("GS2W45100", 4.5, 10),
+                ("GS2W45110", 4.5, 11.5),
+                ("GS2W45130", 4.5, 13),
+                ("GS2W45150", 4.5, 15),
+                ("GS2W50070", 5.0, 7),
+                ("GS2W50080", 5.0, 8.5),
+                ("GS2W50100", 5.0, 10),
+                ("GS2W50110", 5.0, 11.5),
+                ("GS2W50130", 5.0, 13),
+                ("GS2W50150", 5.0, 15),
+                # --- MSP series (partial from image; extend CSV later if needed) ---
+                ("MSP25103R", 2.0, 10),
+                ("MSP25104R", 2.0, 10),
+                ("MSP25113R", 2.5, 11.5),
+                ("MSP25114R", 2.5, 11.5),
+                ("MSP25133R", 2.5, 13),
+                ("MSP25134R", 2.5, 13),
+                ("MSP25153R", 2.5, 15),
+                ("MSP25154R", 2.5, 15),
+                ("MSP30103R", 3.0, 10),
+                ("MSP30104R", 3.0, 10),
+                ("MSP30113R", 3.0, 11.5),
+                ("MSP30114R", 3.0, 11.5),
+                ("MSP30133R", 3.0, 13),
+                ("MSP30134R", 3.0, 13),
+                ("MSP30153R", 3.0, 15),
+                ("MSP30154R", 3.0, 15),
+            ]
+            # Immediately save the seeded CSV
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("ID,Diameter(mm),Height(mm)\n")
+                    for rid, d, h in rows:
+                        f.write(f"{rid},{d},{h}\n")
+            except Exception:
+                pass
+        self._db_set_rows(rows)
+
+    def _db_save_csv(self):
+        path = self._db_csv_path()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("ID,Diameter(mm),Height(mm)\n")
+                for rid, d, h in self._db_get_rows():
+                    f.write(f"{rid},{d},{h}\n")
+            QtWidgets.QMessageBox.information(None, "Saved", f"Database saved to:\n{path}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(None, "Save error", f"Failed to save CSV:\n{e}")
+
+    def _db_on_selection(self):
+        idxs = self.tableView.selectionModel().selectedRows()
+        if not idxs:
+            return
+        r = idxs[0].row()
+        self.edId.setText(self._db_model.item(r, 0).text())
+        self.edDia.setText(self._db_model.item(r, 1).text())
+        self.edHgt.setText(self._db_model.item(r, 2).text())
+
+    def _db_validate_inputs(self):
+        rid = self.edId.text().strip()
+        dia = self.edDia.text().strip()
+        hgt = self.edHgt.text().strip()
+        if not rid:
+            QtWidgets.QMessageBox.warning(None, "Input", "Please enter an ID.")
+            return None
+        if not dia or not hgt:
+            QtWidgets.QMessageBox.warning(None, "Input", "Please enter diameter and height.")
+            return None
+        try:
+            d = float(dia); h = float(hgt)
+        except ValueError:
+            QtWidgets.QMessageBox.warning(None, "Input", "Diameter/Height must be numbers.")
+            return None
+        return rid, d, h
+
+    def _db_find_row_by_id(self, rid: str):
+        for r in range(self._db_model.rowCount()):
+            if self._db_model.item(r, 0).text().strip().lower() == rid.strip().lower():
+                return r
+        return -1
+
+    def _db_add_row(self):
+        valid = self._db_validate_inputs()
+        if not valid:
+            return
+        rid, d, h = valid
+        if self._db_find_row_by_id(rid) != -1:
+            QtWidgets.QMessageBox.warning(None, "Duplicate ID", f"'{rid}' already exists. Use Update instead.")
+            return
+        it_id = QtGui.QStandardItem(rid)
+        it_d  = QtGui.QStandardItem(f"{d:g}")
+        it_h  = QtGui.QStandardItem(f"{h:g}")
+        for it in (it_id, it_d, it_h):
+            it.setEditable(False)
+        self._db_model.appendRow([it_id, it_d, it_h])
+        self.tableView.resizeColumnsToContents()
+
+    def _db_update_row(self):
+        valid = self._db_validate_inputs()
+        if not valid:
+            return
+        rid, d, h = valid
+
+        # Prefer updating the selected row; fallback to ID match
+        idxs = self.tableView.selectionModel().selectedRows()
+        r = idxs[0].row() if idxs else self._db_find_row_by_id(rid)
+        if r == -1:
+            QtWidgets.QMessageBox.warning(None, "Update", "Select a row or ensure the ID exists.")
+            return
+
+        # If ID text changed to a new one that collides, block
+        old_id = self._db_model.item(r, 0).text()
+        if rid.lower() != old_id.lower() and self._db_find_row_by_id(rid) != -1:
+            QtWidgets.QMessageBox.warning(None, "Duplicate ID", f"'{rid}' already exists.")
+            return
+
+        self._db_model.item(r, 0).setText(rid)
+        self._db_model.item(r, 1).setText(f"{d:g}")
+        self._db_model.item(r, 2).setText(f"{h:g}")
+        self.tableView.selectRow(r)
+
+    def _db_delete_selected(self):
+        idxs = self.tableView.selectionModel().selectedRows()
+        if not idxs:
+            QtWidgets.QMessageBox.information(None, "Delete", "Select a row to delete.")
+            return
+        r = idxs[0].row()
+        rid = self._db_model.item(r, 0).text()
+        if QtWidgets.QMessageBox.question(None, "Delete",
+                                          f"Delete implant '{rid}'?",
+                                          QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                                          ) == QtWidgets.QMessageBox.Yes:
+            self._db_model.removeRow(r)
 
     # ----------------------------
     # Other actions
