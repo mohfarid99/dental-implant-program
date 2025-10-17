@@ -1756,12 +1756,10 @@ class Ui_Dialog(object):
         imp_layer = _add_iso_image(IMP, "final_implant", "green","translucent", iso_thr=0.5)
 
         # final_AB: 99% iso threshold
-        ab_layer  = _add_iso_image(AB,  "final_AB","red","translucent_no_depth", iso_thr=99)
+        ab_layer  = _add_iso_image(AB,  "final_AB","red","translucent_no_depth", iso_thr=1)
 
         # final_MC: 99% iso threshold
-        mc_layer  = _add_iso_image(MC,  "final_MC","yellow", "translucent", iso_thr=99)
-
-
+        mc_layer  = _add_iso_image(MC,  "final_MC","yellow", "translucent", iso_thr=1)
 
         # Order: base, AB, implant, MC (skip None layers)
         try:
