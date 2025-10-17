@@ -26,9 +26,13 @@ main.py
   * Saves binary masks into d_side_volume/segmented_AB and d_side_volume/segmented_MC
   * Folders are cleared each run
   * Computes best implant & saves final_AB.npy, final_MC.npy, final_implant.npy
-  * Visualizes: base volume (mip), AB (red, iso, translucent),
+  * Visualizes: base volume (mip), AB (red, iso, translucent_no_depth),
                 Implant (green, iso, translucent), MC (yellow, iso, translucent)
   * Layer order: base, final_AB, final_implant, final_MC
+
+- NEW: Tab 7 iso-threshold controls for final_AB and final_MC like Slicer:
+  * Slider + spinbox (0..1) + percent label for each
+  * Defaults to 0.99 (99%) and live-updates napari iso layers
 """
 import os
 os.environ.pop("QT_OPENGL", None)
@@ -225,6 +229,26 @@ class Ui_Dialog(object):
 
         self.viewerWidget = self.viewer.window._qt_viewer  # embed canvas+controls (no menubar)
 
+        # ---- Iso-threshold controls for AB / MC (Slicer-like) ----
+        thrRow = QtWidgets.QHBoxLayout(); thrRow.setSpacing(10)
+
+        # AB controls
+        self.lblAbThr = QtWidgets.QLabel("AB iso threshold:")
+        self.sldAbThr = QtWidgets.QSlider(QtCore.Qt.Horizontal); self.sldAbThr.setRange(0, 100); self.sldAbThr.setValue(99)
+        self.spnAbThr = QtWidgets.QDoubleSpinBox(); self.spnAbThr.setRange(0.0, 1.0); self.spnAbThr.setSingleStep(0.01); self.spnAbThr.setDecimals(2); self.spnAbThr.setValue(0.99)
+        self.lblAbPct = QtWidgets.QLabel("99%")
+
+        # MC controls
+        self.lblMcThr = QtWidgets.QLabel("MC iso threshold:")
+        self.sldMcThr = QtWidgets.QSlider(QtCore.Qt.Horizontal); self.sldMcThr.setRange(0, 100); self.sldMcThr.setValue(99)
+        self.spnMcThr = QtWidgets.QDoubleSpinBox(); self.spnMcThr.setRange(0.0, 1.0); self.spnMcThr.setSingleStep(0.01); self.spnMcThr.setDecimals(2); self.spnMcThr.setValue(0.99)
+        self.lblMcPct = QtWidgets.QLabel("99%")
+
+        thrRow.addWidget(self.lblAbThr); thrRow.addWidget(self.sldAbThr); thrRow.addWidget(self.spnAbThr); thrRow.addWidget(self.lblAbPct)
+        thrRow.addSpacing(20)
+        thrRow.addWidget(self.lblMcThr); thrRow.addWidget(self.sldMcThr); thrRow.addWidget(self.spnMcThr); thrRow.addWidget(self.lblMcPct)
+        thrRow.addStretch(1)
+
         # Run segmentation + recommendation
         self.btnGetImplantRec = QtWidgets.QPushButton("Get Dental Implant Recommendation")
         self.btnGetImplantRec.setObjectName("btnGetImplantRec")
@@ -234,6 +258,7 @@ class Ui_Dialog(object):
         layout7.addLayout(controls)
         layout7.addLayout(angleRow)
         layout7.addLayout(missingRow)
+        layout7.addLayout(thrRow)  # add threshold controls here
         layout7.addWidget(self.viewerWidget, stretch=1)
         layout7.addWidget(self.btnGetImplantRec, alignment=QtCore.Qt.AlignRight)
 
@@ -326,6 +351,13 @@ class Ui_Dialog(object):
         self._overlay_layer = None
         self._boundary_layer = None
 
+        # iso layers & thresholds
+        self._ab_layer = None
+        self._mc_layer = None
+        self._imp_layer = None
+        self._ab_iso = 0.99
+        self._mc_iso = 0.99
+
         # classifier cache/config (MATCH TRAINING)
         self._clf_model = None
         self._clf_device = "cpu"
@@ -360,6 +392,12 @@ class Ui_Dialog(object):
         self.btnSave.clicked.connect(self._db_save_csv)
         self.btnLoad.clicked.connect(self._db_load_csv)
         self.tableView.selectionModel().selectionChanged.connect(self._db_on_selection)
+
+        # iso threshold sync & handlers
+        self.sldAbThr.valueChanged.connect(lambda v: self.spnAbThr.setValue(v/100.0))
+        self.spnAbThr.valueChanged.connect(self._on_ab_iso_changed)
+        self.sldMcThr.valueChanged.connect(lambda v: self.spnMcThr.setValue(v/100.0))
+        self.spnMcThr.valueChanged.connect(self._on_mc_iso_changed)
 
         self._db_load_csv()
 
@@ -536,6 +574,11 @@ class Ui_Dialog(object):
         else:
             self.viewer.reset_view()
         self.viewer.dims.ndisplay = 3 if self.chk3D.isChecked() else 2
+
+        # clear iso refs on reset
+        self._ab_layer = None
+        self._mc_layer = None
+        self._imp_layer = None
 
     # ----------------------------
     # Implant angle (LEFT / RIGHT) rotation around Z
@@ -1687,8 +1730,29 @@ class Ui_Dialog(object):
         import re
         return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
 
+    def _add_iso_image(self, volume01, name, cmap, blending, iso_thr=0.5):
+        """Helper: add an Image (scalar) with iso rendering & desired styling."""
+        if volume01.ndim != 3 or not np.any(volume01):
+            return None
+        arr = np.ascontiguousarray(volume01.astype(np.float32))
+        layer = self.viewer.add_image(
+            arr,
+            name=name,
+            colormap=cmap,
+            blending=blending,
+            rendering="iso",
+            contrast_limits=(0.0, 1.0),
+            interpolation2d="linear",
+            interpolation3d="linear",
+        )
+        try:
+            layer.iso_threshold = iso_thr
+        except Exception:
+            pass
+        return layer
+
     def _show_final_results_in_napari(self):
-        """Load rotated_expanded_zaxis.npy if present else side_volume.npy; then add final_AB/MC/implant as ISO Image overlays (safe)."""
+        """Load rotated_expanded_zaxis.npy if present else side_volume.npy; then add final_AB/MC/implant as ISO Image overlays."""
         base_path = self._path_rotated_volume() if os.path.isfile(self._path_rotated_volume()) else self._path_side_volume()
         if not base_path or not os.path.isfile(base_path):
             raise RuntimeError("Missing base volume (side_volume.npy).")
@@ -1731,39 +1795,30 @@ class Ui_Dialog(object):
             rgb=False
         )
 
-        def _add_iso_image(volume01, name, cmap, blending, iso_thr=0.5):
-            if volume01.ndim != 3 or not np.any(volume01):
-                return None
-            arr = np.ascontiguousarray(volume01.astype(np.float32))
-            layer = self.viewer.add_image(
-                arr,
-                name=name,
-                colormap=cmap,
-                blending=blending,
-                rendering="iso",
-                contrast_limits=(0.0, 1.0),
-                interpolation2d="linear",
-                interpolation3d="linear",
-            )
-            try:
-                layer.iso_threshold = iso_thr
-            except Exception:
-                pass
-            return layer
+        # clear refs before (re)adding
+        self._ab_layer = None
+        self._mc_layer = None
+        self._imp_layer = None
 
+        # final_implant: interpolation linear, iso, green, translucent (default iso thr 0.5)
+        self._imp_layer = self._add_iso_image(IMP, "final_implant", "green", "translucent", iso_thr=0.5)
 
-        # final_implant: keep previous threshold (e.g., 0.5)
-        imp_layer = _add_iso_image(IMP, "final_implant", "green","translucent", iso_thr=0.5)
+        # final_AB: interpolation linear, iso, red, translucent_no_depth, iso thr from UI (default 0.99)
+        self._ab_layer  = self._add_iso_image(AB,  "final_AB", "red", "translucent_no_depth", iso_thr=self._ab_iso)
 
-        # final_AB: 99% iso threshold
-        ab_layer  = _add_iso_image(AB,  "final_AB","red","translucent_no_depth", iso_thr=1)
+        # final_MC: interpolation linear, iso, yellow, translucent, iso thr from UI (default 0.99)
+        self._mc_layer  = self._add_iso_image(MC,  "final_MC", "yellow", "translucent", iso_thr=self._mc_iso)
 
-        # final_MC: 99% iso threshold
-        mc_layer  = _add_iso_image(MC,  "final_MC","yellow", "translucent", iso_thr=1)
+        # Ensure iso_thresholds reflect current UI (in case controls moved before render)
+        try:
+            if self._ab_layer is not None: self._ab_layer.iso_threshold = self._ab_iso
+            if self._mc_layer is not None: self._mc_layer.iso_threshold = self._mc_iso
+        except Exception:
+            pass
 
         # Order: base, AB, implant, MC (skip None layers)
         try:
-            order = [img_layer, ab_layer, imp_layer, mc_layer]
+            order = [img_layer, self._ab_layer, self._imp_layer, self._mc_layer]
             layers = [lyr for lyr in order if lyr is not None]
             for idx, lyr in enumerate(layers):
                 self.viewer.layers.move(self.viewer.layers.index(lyr), idx)
@@ -1772,6 +1827,25 @@ class Ui_Dialog(object):
 
         self.viewer.dims.ndisplay = 3 if self.chk3D.isChecked() else 2
         self.viewer.reset_view()
+
+    # ---- Iso threshold slots ----
+    def _on_ab_iso_changed(self, val: float):
+        self._ab_iso = float(val)
+        self.lblAbPct.setText(f"{int(round(self._ab_iso*100))}%")
+        if self._ab_layer is not None:
+            try:
+                self._ab_layer.iso_threshold = self._ab_iso
+            except Exception:
+                pass
+
+    def _on_mc_iso_changed(self, val: float):
+        self._mc_iso = float(val)
+        self.lblMcPct.setText(f"{int(round(self._mc_iso*100))}%")
+        if self._mc_layer is not None:
+            try:
+                self._mc_layer.iso_threshold = self._mc_iso
+            except Exception:
+                pass
 
     # ----------------------------
     # Other actions
