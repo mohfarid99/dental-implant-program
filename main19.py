@@ -15,12 +15,13 @@ main.py
 - Auto classification: loads classification.pt (EfficientNet-B0 2-logit with 2.5D input)
   to pick lowest & highest indices predicted as class 0 ("missing")
 
-- TAB "Dental Implant Database":
+- NEW on Tab index 4 ("Dental Implant Database"):
   * CSV-backed table (implant_database.csv next to this script)
   * Add / Update / Delete rows (ID, Diameter(mm), Height(mm))
   * Click row to edit; ID must be unique
 
-- "Get Dental Implant Recommendation" runs YOLOv8 segmentation (segmentation.pt)
+- NEW: "Get Dental Implant Recommendation" runs YOLOv8 segmentation (segmentation.pt)
+  * Loads segmentation.pt from the SAME FOLDER as this file
   * Segments only the selected missing-slice range (start..end)
   * Saves binary masks into d_side_volume/segmented_AB and d_side_volume/segmented_MC
   * Folders are cleared each run
@@ -29,7 +30,26 @@ main.py
                 Implant (green, iso, translucent), MC (yellow, iso, translucent)
   * Layer order: base, final_AB, final_implant, final_MC
 """
+import os
+os.environ.pop("QT_OPENGL", None)
+os.environ.pop("VISPY_FORCE_GL", None)
+os.environ["QT_OPENGL"] = "desktop"    # request desktop GL
+
 from PyQt5 import QtCore, QtGui, QtWidgets
+fmt = QtGui.QSurfaceFormat()
+fmt.setRenderableType(QtGui.QSurfaceFormat.OpenGL)    # desktop GL
+fmt.setVersion(2, 1)
+fmt.setProfile(QtGui.QSurfaceFormat.CompatibilityProfile)
+fmt.setDepthBufferSize(24)
+fmt.setStencilBufferSize(8)
+fmt.setSamples(0)
+QtGui.QSurfaceFormat.setDefaultFormat(fmt)
+
+
+from vispy import app
+app.use_app('pyqt5')                                 # no gloo.gl.use_gl(...)
+
+import napari
 import subprocess, os, sys, importlib.util
 import numpy as np
 
@@ -181,16 +201,14 @@ class Ui_Dialog(object):
         missingRow.addWidget(self.btnGetMissingAuto)
         missingRow.addStretch(1)
 
-        # ---- critical: force software OpenGL BEFORE importing napari/viewer ----
-        os.environ.setdefault("QT_OPENGL", "software")
-        os.environ.setdefault("VISPY_USE_APP", "pyqt5")
+        # Napari viewer
         os.environ.setdefault("QT_API", "pyqt5")
+        os.environ.setdefault("VISPY_USE_APP", "pyqt5")
         import napari
-
         self.viewer = napari.Viewer(show=False)
         # Patch Napari status checker to avoid noisy exceptions
         try:
-            import napari._qt.threads.status_checker as sc
+            import napari._qt.threads.status_checker as sc # type: ignore
             _orig_calc_status = sc.StatusChecker.calculate_status
             def _safe_calc_status(self, *a, **kw):
                 try:
@@ -692,7 +710,7 @@ class Ui_Dialog(object):
         except Exception:
             self._boundary_layer = None
 
-        self._bury_overlays(self._get_image_layer())
+        self._bury_overlays(base)
 
         QtWidgets.QMessageBox.information(None, "Set",
                                           f"Missing teeth slice set to [{s_val}, {e_val}].\n"
@@ -1251,8 +1269,14 @@ class Ui_Dialog(object):
         except Exception as e:
             QtWidgets.QMessageBox.critical(None, "Visualization error", f"Failed to visualize results:\n{e}")
 
-    # ---------- Recommendation code ----------
+    # ---------- Recommendation code (adapted; fixes applied) ----------
     def _compute_implant_recommendation_and_save(self):
+        """
+        Implements your implant-selection algorithm BUT:
+        - start/end slices are taken from the UI (Missing teeth slice boxes)
+          instead of counting files in '1_refined'
+        - all length checks use (end - start + 1)
+        """
         import math, re
         from PIL import Image
 
@@ -1261,7 +1285,7 @@ class Ui_Dialog(object):
         if not patient_dir:
             raise RuntimeError("Invalid patient folder.")
 
-        # Get range from UI
+        # Get range from UI (this replaces any dependency on '1_refined')
         try:
             ui_start = int(self.txtMissingStart.text().strip())
             ui_end   = int(self.txtMissingEnd.text().strip())
@@ -1273,7 +1297,7 @@ class Ui_Dialog(object):
 
         start_filename = ui_start
         end_filename   = ui_end
-        length_between_teeth = end_filename - start_filename + 1
+        length_between_teeth = end_filename - start_filename + 1  # <-- replaces 1_refined count
 
         alveolar_bone_path = os.path.join(patient_dir, 'segmented_AB')
         mandibular_canal_path = os.path.join(patient_dir, 'segmented_MC')
@@ -1300,6 +1324,7 @@ class Ui_Dialog(object):
             return cnts[int(np.argmax(areas))]
 
         def load_images(alv_path, mc_path):
+            # Load only images in AB/MC folders (they were already created only for [start..end])
             alv = [binarize_image(cv2.imread(os.path.join(alv_path, img), cv2.IMREAD_GRAYSCALE))
                    for img in sorted(os.listdir(alv_path), key=self._natural_key)
                    if img.lower().endswith(('.png','.jpg','.jpeg','.bmp','.tiff'))]
@@ -1342,14 +1367,28 @@ class Ui_Dialog(object):
             m = re.search(r'\d+', filename)
             return int(m.group()) if m else -1
 
+        # ==== SAVING AS (Z,Y,X) ONLY ====
         def read_and_convert_images_to_npy(input_folder, output_file):
             files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.png','.jpg','.jpeg','.bmp'))]
             files.sort(key=lambda x: extract_number(x))
             imgs = []
             for f in files:
-                im = cv2.imread(os.path.join(input_folder, f), cv2.IMREAD_GRAYSCALE)
-                if im is not None: imgs.append(im)
-            arr = np.array(imgs)
+                im = cv2.imread(os.path.join(input_folder, f), cv2.IMREAD_UNCHANGED)
+                if im is None:
+                    continue
+                # force to 2D grayscale
+                if im.ndim == 3:
+                    if im.shape[2] == 1:
+                        im = im[:, :, 0]
+                    else:
+                        im = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+                imgs.append(im)
+            if imgs:
+                arr = np.stack(imgs, axis=0)     # (Z, Y, X)
+            else:
+                arr = np.zeros((0,), dtype=np.uint8)
+            if arr.ndim == 4 and arr.shape[-1] == 1:
+                arr = arr[..., 0]
             np.save(output_file, arr)
 
         def copy_files(src, dst):
@@ -1617,6 +1656,7 @@ class Ui_Dialog(object):
                                resolution=(w, h))
 
         # Fill the rest of slices with black for implant and AB/MC
+        total_slices = int(np.load(all_slices_path).shape[0])
         def fill_black(end_total, range_start, range_end, fmt, out_folder, resolution):
             W, H = resolution
             for num in range(end_total):
@@ -1624,7 +1664,6 @@ class Ui_Dialog(object):
                     image = np.zeros((H, W), dtype=np.uint8)
                     cv2.imwrite(os.path.join(out_folder, fmt.format(num=num)), image)
 
-        total_slices = int(np.load(all_slices_path).shape[0])
         fill_black(total_slices, best[4] + start_filename, best[5] + start_filename,
                    fmt="implant_{num}.png", out_folder=implant_only_path, resolution=(w, h))
         fill_black(total_slices, start_filename, end_filename,
@@ -1636,7 +1675,7 @@ class Ui_Dialog(object):
         copy_files(alveolar_bone_path, final_AB_path)
         copy_files(mandibular_canal_path, final_MC_path)
 
-        # Save final npy stacks for viewer (shape: Z,Y,X)
+        # Save final npy stacks for viewer (strictly (Z,Y,X))
         read_and_convert_images_to_npy(final_AB_path, patient_path_AB)
         read_and_convert_images_to_npy(final_MC_path, patient_path_MC)
         read_and_convert_images_to_npy(implant_only_path, patient_path_imp)
@@ -1663,9 +1702,17 @@ class Ui_Dialog(object):
             if not os.path.isfile(p):
                 raise RuntimeError(f"Missing {os.path.basename(p)}. Make sure recommendation step completed.")
 
-        AB  = (np.load(ab_path)  > 0).astype(np.uint8)
-        MC  = (np.load(mc_path)  > 0).astype(np.uint8)
-        IMP = (np.load(imp_path) > 0).astype(np.uint8)
+        # ---- load & enforce (Z, Y, X) ----
+        AB  = np.load(ab_path)
+        MC  = np.load(mc_path)
+        IMP = np.load(imp_path)
+        if AB.ndim == 4 and AB.shape[-1] == 1:  AB  = AB[..., 0]
+        if MC.ndim == 4 and MC.shape[-1] == 1:  MC  = MC[..., 0]
+        if IMP.ndim == 4 and IMP.shape[-1] == 1: IMP = IMP[..., 0]
+
+        AB  = (AB  > 0).astype(np.uint8)
+        MC  = (MC  > 0).astype(np.uint8)
+        IMP = (IMP > 0).astype(np.uint8)
 
         # Sanity logs (optional)
         print("Base:", vol.shape, vol.dtype)
@@ -1689,11 +1736,9 @@ class Ui_Dialog(object):
             if volume01.ndim != 3:
                 return None
             if not np.any(volume01):
+                # Nothing to show; skip to avoid iso-surface issues on empty data
                 return None
             arr = np.ascontiguousarray(volume01.astype(np.float32))  # iso expects scalar image
-            # sanitize to avoid NaN/Inf going to the shader
-            if not np.isfinite(arr).all():
-                arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
             layer = self.viewer.add_image(
                 arr, name=name,
                 colormap=cmap,
@@ -1702,15 +1747,8 @@ class Ui_Dialog(object):
                 contrast_limits=(0.0, 1.0),
                 interpolation3d="nearest"
             )
-            # safe iso threshold
             try:
-                layer.iso_threshold = 0.5
-            except Exception:
-                pass
-            # disable picking to avoid MeshVisual picking crashes
-            try:
-                if hasattr(layer, "_allow_pick"):
-                    layer._allow_pick = False
+                layer.iso_threshold = 0.5  # a touch above 0 to avoid speckles
             except Exception:
                 pass
             return layer
@@ -1793,7 +1831,7 @@ class Ui_Dialog(object):
 
 # Entrypoint
 if __name__ == "__main__":
-    # You can also uncomment the next line if you want to be extra explicit:
+    # Optional: choose software rendering if you hit OpenGL issues:
     # os.environ["QT_OPENGL"] = "software"
     app = QtWidgets.QApplication(sys.argv)
     Dialog = QtWidgets.QDialog()
