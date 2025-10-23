@@ -390,6 +390,8 @@ class Ui_Dialog(object):
         self._ab_iso = 0.99
         self._mc_iso = 0.99
 
+        self._is_updating_implant = False
+
         # classifier cache/config (MATCH TRAINING)
         self._clf_model = None
         self._clf_device = "cpu"
@@ -537,6 +539,7 @@ class Ui_Dialog(object):
                     continue
         except Exception:
             pass
+    # ----------------------------
         return None
 
     # ----------------------------
@@ -919,7 +922,7 @@ class Ui_Dialog(object):
         roi = cv2.resize(roi, (self._clf_img_size, self._clf_img_size), interpolation=cv2.INTER_AREA)
         roi = roi.astype(np.float32)
         mn, mx = float(roi.min()), float(roi.max())
-        roi = (roi - mn) / (mx - mn + 1e-6)
+        roi = (roi - mn) / (mx - mn) if (mx - mn) > 1e-6 else roi
         return roi
 
     def _slice_stack_2p5d(self, vol: np.ndarray, idx: int) -> np.ndarray:
@@ -1350,6 +1353,13 @@ class Ui_Dialog(object):
             QtWidgets.QMessageBox.critical(None, "Recommendation error", f"Failed to compute recommendation:\n{e}")
             return
 
+        # >>> NEW: show AB/MC right away, regardless of candidates
+        try:
+            self._show_final_results_in_napari()
+        except Exception as e:
+            # don’t block the rest; just notify
+            QtWidgets.QMessageBox.warning(None, "Visualization", f"Could not load AB/MC into viewer yet:\n{e}")
+
         # 3) Handle candidate list
         self._candidate_implants = candidates or []
         self._candidate_ctx = ctx if candidates else None
@@ -1368,6 +1378,7 @@ class Ui_Dialog(object):
 
         # 5) Show the options in UI so user can switch
         self._populate_implant_options_ui()
+
 
     # ---------- Recommendation code (adapted; returns candidates + context) ----------
     def _compute_implant_recommendation_and_save(self, return_candidates=False):
@@ -1719,7 +1730,7 @@ class Ui_Dialog(object):
                 if start_i <= i <= end_i:
                     x0 = max(0, min(initial_x, W - d_px))
                     y0 = max(0, min(implant_y, H - h_px))
-                    x1 = min(W-1, x0 + d_px)
+                    x1 = min(H-1, x0 + d_px)
                     y1 = min(H-1, y0 + h_px)
                     cv2.rectangle(combined, (x0, y0), (x1, y1), (0,255,0), 1)
 
@@ -1834,66 +1845,266 @@ class Ui_Dialog(object):
             pass
         return layer
 
+    # ========== NEW: safe implant-only layer reload (in-place, no scene rebuild) ==========
+    def _load_implant_layer_only(self) -> bool:
+        """
+        Safely (re)load final_implant.npy into the existing implant layer, without
+        touching the base CBCT or AB/MC layers. Returns True if visible data loaded.
+        """
+        try:
+            patient_dir = self._cbct_dir()
+            if not patient_dir:
+                return False
+            imp_path = os.path.join(patient_dir, 'final_implant.npy')
+            if not os.path.isfile(imp_path):
+                return False
+
+            IMP = np.load(imp_path)
+            if IMP.ndim == 4 and IMP.shape[-1] == 1:
+                IMP = IMP[..., 0]
+            IMP = (IMP > 0).astype(np.uint8)
+            if not np.any(IMP):
+                if self._imp_layer is not None:
+                    self._imp_layer.visible = False
+                return False
+
+            arr = np.ascontiguousarray(IMP.astype(np.float32))
+
+            # Create once, then just swap data
+            if (self._imp_layer is None) or ('final_implant' not in self.viewer.layers):
+                self._imp_layer = self.viewer.add_image(
+                    arr, name="final_implant", colormap="green", blending="translucent",
+                    rendering="iso", contrast_limits=(0.0, 1.0),
+                    interpolation2d="nearest", interpolation3d="nearest",
+                )
+            else:
+                self._imp_layer.data = arr
+                try:
+                    self._imp_layer.visible = True
+                except Exception:
+                    pass
+
+            try:
+                self._imp_layer.iso_threshold = 0.5
+            except Exception:
+                pass
+
+            # keep intended layer order as best as we can
+            try:
+                order_names = [
+                    os.path.basename(self._path_rotated_volume() or self._path_side_volume() or ""),
+                    "final_AB",
+                    "final_implant",
+                    "final_MC",
+                ]
+                existing = [nm for nm in order_names if nm in self.viewer.layers]
+                for idx, nm in enumerate(existing):
+                    self.viewer.layers.move(self.viewer.layers.index(nm), idx)
+            except Exception:
+                pass
+
+            return True
+        except Exception:
+            return False
+
+    def _ensure_final_ab_mc_npys(self):
+        """
+        If final_AB.npy / final_MC.npy are missing or empty, rebuild them directly
+        from segmented_AB/ and segmented_MC/ so Napari can show them again.
+        This does NOT change your existing pipeline; it only backfills when needed.
+        """
+        patient_dir = self._cbct_dir()
+        if not patient_dir:
+            return
+
+        ab_npy  = os.path.join(patient_dir, 'final_AB.npy')
+        mc_npy  = os.path.join(patient_dir, 'final_MC.npy')
+        ab_dir  = os.path.join(patient_dir, 'segmented_AB')
+        mc_dir  = os.path.join(patient_dir, 'segmented_MC')
+
+        # If both files exist and look valid, nothing to do
+        def _valid_npy(p):
+            try:
+                if not os.path.isfile(p):
+                    return False
+                arr = np.load(p, mmap_mode='r')
+                return (arr.ndim == 3) and arr.size > 0
+            except Exception:
+                return False
+
+        if _valid_npy(ab_npy) and _valid_npy(mc_npy):
+            return
+
+        # Need base volume to know Z, and one mask to know H/W
+        base_path = self._path_rotated_volume() if os.path.isfile(self._path_rotated_volume()) else self._path_side_volume()
+        if not base_path or not os.path.isfile(base_path):
+            return
+
+        try:
+            vol = np.load(base_path, mmap_mode='r')
+            Z = int(vol.shape[0])
+        except Exception:
+            return
+
+        # Probe one image to get H, W
+        def _first_image_shape(folder):
+            if not os.path.isdir(folder):
+                return None
+            for fn in sorted(os.listdir(folder)):
+                if fn.lower().endswith(('.png','.jpg','.jpeg','.bmp','.tiff')):
+                    im = cv2.imread(os.path.join(folder, fn), cv2.IMREAD_GRAYSCALE)
+                    if im is not None:
+                        return im.shape[:2]  # H, W
+            return None
+
+        ab_shape = _first_image_shape(ab_dir)
+        mc_shape = _first_image_shape(mc_dir)
+        hw = ab_shape or mc_shape
+        if hw is None:
+            # nothing to rebuild from
+            return
+        H, W = hw
+
+        # Prepare empty stacks
+        AB = np.zeros((Z, H, W), dtype=np.uint8)
+        MC = np.zeros((Z, H, W), dtype=np.uint8)
+
+        import re
+        def _num_from_name(name):
+            m = re.search(r'(\d+)', name)
+            return int(m.group(1)) if m else None
+
+        def _binarize(img):
+            # Map 0/255 (or grayscale) to 0/1 mask consistently
+            if img is None:
+                return None
+            if img.dtype != np.uint8:
+                img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            _, bin_im = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+            return (bin_im > 0).astype(np.uint8)
+
+        # Fill AB
+        if os.path.isdir(ab_dir):
+            for fn in os.listdir(ab_dir):
+                if not fn.lower().endswith(('.png','.jpg','.jpeg','.bmp','.tiff')):
+                    continue
+                z = _num_from_name(fn)
+                if z is None or z < 0 or z >= Z:
+                    continue
+                im = cv2.imread(os.path.join(ab_dir, fn), cv2.IMREAD_GRAYSCALE)
+                if im is None:
+                    continue
+                if im.shape[:2] != (H, W):
+                    im = cv2.resize(im, (W, H), interpolation=cv2.INTER_NEAREST)
+                m = _binarize(im)
+                if m is not None:
+                    AB[z] = m
+
+        # Fill MC
+        if os.path.isdir(mc_dir):
+            for fn in os.listdir(mc_dir):
+                if not fn.lower().endswith(('.png','.jpg','.jpeg','.bmp','.tiff')):
+                    continue
+                z = _num_from_name(fn)
+                if z is None or z < 0 or z >= Z:
+                    continue
+                im = cv2.imread(os.path.join(mc_dir, fn), cv2.IMREAD_GRAYSCALE)
+                if im is None:
+                    continue
+                if im.shape[:2] != (H, W):
+                    im = cv2.resize(im, (W, H), interpolation=cv2.INTER_NEAREST)
+                m = _binarize(im)
+                if m is not None:
+                    MC[z] = m
+
+        # Clean & save (keeps your existing morphology defaults)
+        AB = _clean_binary_stack(AB, open_iter=1, close_iter=2, min_voxels=800)
+        MC = _clean_binary_stack(MC, open_iter=1, close_iter=1, min_voxels=300)
+        np.save(ab_npy, AB)
+        np.save(mc_npy, MC)
+
+
     def _show_final_results_in_napari(self):
-        """Load rotated_expanded_zaxis.npy if present else side_volume.npy; then add final_AB/MC/implant as ISO Image overlays."""
+        """Ensure final_AB/MC exist; then load base + AB + implant + MC as ISO overlays."""
+        # Base path: rotated first (if exists), else original
         base_path = self._path_rotated_volume() if os.path.isfile(self._path_rotated_volume()) else self._path_side_volume()
         if not base_path or not os.path.isfile(base_path):
             raise RuntimeError("Missing base volume (side_volume.npy).")
-        vol = np.load(base_path)
+
+        # If AB/MC npys are missing/empty, rebuild them from segmented_* folders
+        self._ensure_final_ab_mc_npys()
 
         patient_dir = self._cbct_dir()
         ab_path  = os.path.join(patient_dir, 'final_AB.npy')
         mc_path  = os.path.join(patient_dir, 'final_MC.npy')
         imp_path = os.path.join(patient_dir, 'final_implant.npy')
-        for p in (ab_path, mc_path, imp_path):
-            if not os.path.isfile(p):
-                raise RuntimeError(f"Missing {os.path.basename(p)}. Make sure recommendation step completed and implant applied.")
 
-        # ---- load & enforce (Z, Y, X) ----
+        # Load arrays
+        vol = np.load(base_path)
+
+        if not os.path.isfile(ab_path) or not os.path.isfile(mc_path):
+            raise RuntimeError("final_AB.npy / final_MC.npy not found. Run recommendation first.")
+
         AB  = np.load(ab_path)
         MC  = np.load(mc_path)
-        IMP = np.load(imp_path)
+
+        # final_implant may not exist until an option is applied; handle gracefully
+        IMP = None
+        if os.path.isfile(imp_path):
+            IMP = np.load(imp_path)
+
+        # Ensure (Z, Y, X) and binary 0/1
         if AB.ndim == 4 and AB.shape[-1] == 1:  AB  = AB[..., 0]
         if MC.ndim == 4 and MC.shape[-1] == 1:  MC  = MC[..., 0]
-        if IMP.ndim == 4 and IMP.shape[-1] == 1: IMP = IMP[..., 0]
+        AB  = (AB > 0).astype(np.uint8)
+        MC  = (MC > 0).astype(np.uint8)
 
-        AB  = (AB  > 0).astype(np.uint8)
-        MC  = (MC  > 0).astype(np.uint8)
-        IMP = (IMP > 0).astype(np.uint8)
+        if IMP is not None:
+            if IMP.ndim == 4 and IMP.shape[-1] == 1:
+                IMP = IMP[..., 0]
+            IMP = (IMP > 0).astype(np.uint8)
 
-        # Base image (force mip)
+        # Rebuild viewer
         self.viewer.layers.clear()
+
+        # Base image (force MIP)
         img_layer = self.viewer.add_image(
             vol, name=os.path.basename(base_path),
             colormap="gray",
             interpolation2d="linear", interpolation3d="linear",
             blending="additive",
-            rendering="mip",  # <--- force mip for base
+            rendering="mip",
             rgb=False
         )
 
-        # clear refs before (re)adding
+        # Clear refs before (re)adding
         self._ab_layer = None
         self._mc_layer = None
         self._imp_layer = None
 
-        # final_implant: iso, green, translucent
-        self._imp_layer = self._add_iso_image(IMP, "final_implant", "green", "translucent", iso_thr=0.5)
+        # Add layers (AB first, Implant optional, MC last)
+        # Use iso rendering; thresholds from UI; make sure visible
+        self._ab_layer  = self._add_iso_image(AB.astype(np.float32),"final_AB","red","translucent_no_depth", iso_thr=self._ab_iso)
+        if self._ab_layer is not None:
+            self._ab_layer.visible = True
 
-        # final_AB: iso, red, translucent_no_depth, iso thr from UI (default 0.99)
-        self._ab_layer  = self._add_iso_image(AB,  "final_AB", "red", "translucent_no_depth", iso_thr=self._ab_iso)
+        if IMP is not None and np.any(IMP):
+            self._imp_layer = self._add_iso_image(IMP.astype(np.float32), "final_implant", "green", "translucent", iso_thr=0.5)
+            if self._imp_layer is not None:
+                self._imp_layer.visible = True
 
-        # final_MC: iso, yellow, translucent, iso thr from UI (default 0.99)
-        self._mc_layer  = self._add_iso_image(MC,  "final_MC", "yellow", "translucent", iso_thr=self._mc_iso)
+        self._mc_layer  = self._add_iso_image(MC.astype(np.float32),  "final_MC","yellow", "translucent",iso_thr=self._mc_iso)
+        if self._mc_layer is not None:
+            self._mc_layer.visible = True
 
-        # Ensure iso_thresholds reflect current UI
+        # Re-apply iso thresholds in case UI moved
         try:
             if self._ab_layer is not None: self._ab_layer.iso_threshold = self._ab_iso
             if self._mc_layer is not None: self._mc_layer.iso_threshold = self._mc_iso
         except Exception:
             pass
 
-        # Order: base, AB, implant, MC (skip None layers)
+        # Order: base, AB, implant (if any), MC
         try:
             order = [img_layer, self._ab_layer, self._imp_layer, self._mc_layer]
             layers = [lyr for lyr in order if lyr is not None]
@@ -1902,8 +2113,10 @@ class Ui_Dialog(object):
         except Exception:
             pass
 
+        # 3D on/off as per UI and reset view
         self.viewer.dims.ndisplay = 3 if self.chk3D.isChecked() else 2
         self.viewer.reset_view()
+
 
     # ---- Iso threshold slots ----
     def _on_ab_iso_changed(self, val: float):
@@ -1943,61 +2156,84 @@ class Ui_Dialog(object):
         self.cmbImplantOptions.setEnabled(True)
         self.btnApplyImplant.setEnabled(True)
 
+    # ========== UPDATED: apply choice safely (defer draw & update layer in-place) ==========
     def _save_implant_choice(self, candidate, ctx):
         """
         Rebuilds implant-only images/final_implant.npy using the chosen candidate,
-        then refreshes the viewer. 'candidate' = (d_mm, h_mm, x_px, y_px, start_i, end_i, volume)
+        then refreshes the viewer *safely*. 'candidate' = (d_mm, h_mm, x_px, y_px, start_i, end_i, volume)
         """
         import os
         import numpy as np
         import cv2
 
-        d_mm, h_mm, x_px, y_px, start_i, end_i, _vol = candidate
+        # prevent re-entrant updates during vispy draws
+        if getattr(self, "_is_updating_implant", False):
+            return
+        self._is_updating_implant = True
 
-        # unpack context
-        (patient_dir, alveolar_bone_path, mandibular_canal_path, implant_only_path,
-         final_AB_path, final_MC_path, all_slices_path,
-         start_filename, end_filename, get_image_resolution,
-         convert_to_pixels, draw_implant_in_images, fill_black, copy_files,
-         read_and_convert_images_to_npy) = (
-            ctx["patient_dir"], ctx["alveolar_bone_path"], ctx["mandibular_canal_path"], ctx["implant_only_path"],
-            ctx["final_AB_path"], ctx["final_MC_path"], ctx["all_slices_path"],
-            ctx["start_filename"], ctx["end_filename"], ctx["get_image_resolution"],
-            ctx["convert_to_pixels"], ctx["draw_implant_in_images"], ctx["fill_black"], ctx["copy_files"],
-            ctx["read_and_convert_images_to_npy"]
-        )
-
-        patient_path_imp = os.path.join(patient_dir, 'final_implant.npy')
-        w, h = get_image_resolution(alveolar_bone_path)
-
-        # Clear and redraw implant-only for the selected candidate
-        os.makedirs(implant_only_path, exist_ok=True)
-        for name in os.listdir(implant_only_path):
-            try:
-                os.remove(os.path.join(implant_only_path, name))
-            except Exception:
-                pass
-
-        # Draw only on absolute slice indices
-        abs_start = start_i + start_filename
-        abs_end   = end_i   + start_filename
-        draw_implant_in_images(
-            [], d_mm, h_mm, x_px, y_px,
-            implant_only_path, abs_start, abs_end, resolution=(w, h)
-        )
-
-        total_slices = int(np.load(all_slices_path).shape[0])
-        fill_black(total_slices, abs_start, abs_end,
-                   fmt="implant_{num}.png", out_folder=implant_only_path, resolution=(w, h))
-
-        # Save final_implant.npy (Z,Y,X)
-        read_and_convert_images_to_npy(implant_only_path, patient_path_imp)
-
-        # Refresh the 3D view using updated final_implant.npy
         try:
-            self._show_final_results_in_napari()
+            d_mm, h_mm, x_px, y_px, start_i, end_i, _vol = candidate
+
+            # unpack context
+            (patient_dir, alveolar_bone_path, mandibular_canal_path, implant_only_path,
+             final_AB_path, final_MC_path, all_slices_path,
+             start_filename, end_filename, get_image_resolution,
+             convert_to_pixels, draw_implant_in_images, fill_black, copy_files,
+             read_and_convert_images_to_npy) = (
+                ctx["patient_dir"], ctx["alveolar_bone_path"], ctx["mandibular_canal_path"], ctx["implant_only_path"],
+                ctx["final_AB_path"], ctx["final_MC_path"], ctx["all_slices_path"],
+                ctx["start_filename"], ctx["end_filename"], ctx["get_image_resolution"],
+                ctx["convert_to_pixels"], ctx["draw_implant_in_images"], ctx["fill_black"], ctx["copy_files"],
+                ctx["read_and_convert_images_to_npy"]
+            )
+
+            patient_path_imp = os.path.join(patient_dir, 'final_implant.npy')
+            w, h = get_image_resolution(alveolar_bone_path)
+
+            # Clear and redraw implant-only for the selected candidate
+            os.makedirs(implant_only_path, exist_ok=True)
+            for name in os.listdir(implant_only_path):
+                try:
+                    os.remove(os.path.join(implant_only_path, name))
+                except Exception:
+                    pass
+
+            # Absolute Z indices in the full stack
+            abs_start = start_i + start_filename
+            abs_end   = end_i   + start_filename
+
+            draw_implant_in_images(
+                [], d_mm, h_mm, x_px, y_px,
+                implant_only_path, abs_start, abs_end, resolution=(w, h)
+            )
+
+            total_slices = int(np.load(all_slices_path).shape[0])
+            fill_black(total_slices, abs_start, abs_end,
+                       fmt="implant_{num}.png", out_folder=implant_only_path, resolution=(w, h))
+
+            # Save final_implant.npy (Z,Y,X)
+            read_and_convert_images_to_npy(implant_only_path, patient_path_imp)
+
+            # ---- defer the viewer update to the next event-loop tick
+            def _deferred_update():
+                try:
+                    # Prefer in-place layer update (no scene rebuild) to avoid draw-time access violations
+                    if not self._load_implant_layer_only():
+                        # First-time visualization (no base/AB/MC yet) -> use your existing full renderer
+                        self._show_final_results_in_napari()
+                except Exception as e:
+                    try:
+                        QtWidgets.QMessageBox.critical(None, "Visualization error", f"Failed to visualize results:\n{e}")
+                    except Exception:
+                        pass
+                finally:
+                    self._is_updating_implant = False
+
+            QtCore.QTimer.singleShot(0, _deferred_update)
+
         except Exception as e:
-            QtWidgets.QMessageBox.critical(None, "Visualization error", f"Failed to visualize results:\n{e}")
+            self._is_updating_implant = False
+            QtWidgets.QMessageBox.critical(None, "Apply error", f"Failed to apply selected implant:\n{e}")
 
     def _apply_selected_implant(self):
         """User picked another option; rebuild 'final_implant.npy' and refresh."""
