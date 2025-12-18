@@ -403,18 +403,18 @@ class Ui_Dialog(object):
         # ----------------------------
         # TAB 4: Dental Implant Recommendation
         # ----------------------------
-        self.tab_5 = QtWidgets.QWidget()
-        self.tab_5.setObjectName("tab_5")
-        self.lineEdit_3 = QtWidgets.QLineEdit(self.tab_5)
-        self.lineEdit_3.setGeometry(QtCore.QRect(30, 50, 260, 32))
-        self.lineEdit_3.setObjectName("lineEdit_3")
-        self.pushButton_5 = QtWidgets.QPushButton(self.tab_5)
-        self.pushButton_5.setGeometry(QtCore.QRect(310, 50, 200, 32))
-        self.pushButton_5.setObjectName("pushButton_5")
-        self.pushButton_6 = QtWidgets.QPushButton(self.tab_5)
-        self.pushButton_6.setGeometry(QtCore.QRect(30, 100, 260, 32))
-        self.pushButton_6.setObjectName("pushButton_6")
-        self.tabWidget.addTab(self.tab_5, "")
+        # self.tab_5 = QtWidgets.QWidget()
+        # self.tab_5.setObjectName("tab_5")
+        # self.lineEdit_3 = QtWidgets.QLineEdit(self.tab_5)
+        # self.lineEdit_3.setGeometry(QtCore.QRect(30, 50, 260, 32))
+        # self.lineEdit_3.setObjectName("lineEdit_3")
+        # self.pushButton_5 = QtWidgets.QPushButton(self.tab_5)
+        # self.pushButton_5.setGeometry(QtCore.QRect(310, 50, 200, 32))
+        # self.pushButton_5.setObjectName("pushButton_5")
+        # self.pushButton_6 = QtWidgets.QPushButton(self.tab_5)
+        # self.pushButton_6.setGeometry(QtCore.QRect(30, 100, 260, 32))
+        # self.pushButton_6.setObjectName("pushButton_6")
+        # self.tabWidget.addTab(self.tab_5, "")
 
         # ----------------------------
         # TAB 5: Dental Implant Database (CRUD + CSV)
@@ -3383,9 +3383,9 @@ class Ui_Dialog(object):
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab), _("Dialog", "1. Load Patient Folder"))
         self.pushButton_4.setText(_("Dialog", "Annotate The Jaw Curve"))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_2), _("Dialog", "2. Annotate The Jaw Curve"))
-        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_7), _("Dialog", "3. Set Dental Implant Angle"))
-        self.pushButton_5.setText(_("Dialog", "Load The Jaw Curve"))
-        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_5), _("Dialog", "4. Dental Implant Recommendation"))
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_7), _("Dialog", "3. Dental Implant Recommendation"))
+        # self.pushButton_5.setText(_("Dialog", "Load The Jaw Curve"))
+        # self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_5), _("Dialog", "4. Dental Implant Recommendation"))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_6), _("Dialog", "Dental Implant Database"))
 
 
