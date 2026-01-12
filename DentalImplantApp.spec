@@ -46,7 +46,7 @@ datas += [
 ]
 
 a = Analysis(
-    ['main42.py'],
+    ['main46.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
