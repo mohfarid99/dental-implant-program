@@ -155,15 +155,70 @@
     if (state.blend) el.imgOverlay.classList.remove("img-blend");
     el.sliceLabel.textContent = `${state.curSlice} / ${state.slices - 1}`;
     el.sliceSlider.value = state.curSlice;
+    // If the 3D view is active, refresh it with the new volume too
+    if (window.Vol3D && window.Vol3D.active && state.sid) {
+      window.Vol3D.refresh(state.sid).catch(() => {});
+    }
   }
 
-  // view-mode segment buttons
+  // view-mode segment buttons (2D / Overlay / 3D)
   $$(".seg-btn").forEach((b) => b.addEventListener("click", () => {
+    if (b.id === "btn2d3d") { enter3D(); return; }
+    // 2D buttons: exit 3D first if active
+    if (window.Vol3D && window.Vol3D.active) {
+      window.Vol3D.hide();
+      $("#imgStack").style.display = "";
+    }
     $$(".seg-btn").forEach((x) => x.classList.remove("is-active"));
     b.classList.add("is-active");
     state.viewMode = b.dataset.view;
+    showToolbar3d(false);
     updateViewer();
   }));
+
+  function showToolbar3d(on) {
+    $("#ctl3dThreshold").style.display = on ? "inline-flex" : "none";
+    $("#ctl3dOpacity").style.display = on ? "inline-flex" : "none";
+  }
+
+  let _vol3dPromise = null;
+  function ensureVol3d() {
+    if (!window.Vol3D) return null;
+    if (!window.Vol3D.ready) {
+      // lazy-import the module if it hasn't booted yet
+      if (!_vol3dPromise) _vol3dPromise = import("./vol3d.js");
+      return _vol3dPromise;
+    }
+    return Promise.resolve(window.Vol3D);
+  }
+
+  async function enter3D() {
+    if (!state.sid) { toast("Open a session first.", "err"); return; }
+    $$(".seg-btn").forEach((x) => x.classList.remove("is-active"));
+    $("#btn2d3d").classList.add("is-active");
+    showToolbar3d(true);
+    if (window.Vol3D) {
+      const V = await ensureVol3d();
+      if (!V) { toast("3D module failed to load.", "err"); return; }
+      try {
+        await V.show(state.sid);
+        V.setThreshold(parseInt($("#volThreshold").value, 10));
+        V.setOpacity(parseInt($("#volOpacity").value, 10));
+        $("#imgStack").style.display = "none";
+      } catch (e) {
+        toast("3D failed: " + e.message, "err", 7000);
+      }
+    } else {
+      toast("3D module not ready — reload the page.", "err", 6000);
+    }
+  }
+
+  $("#volThreshold").addEventListener("input", (e) => {
+    if (window.Vol3D) window.Vol3D.setThreshold(parseInt(e.target.value, 10));
+  });
+  $("#volOpacity").addEventListener("input", (e) => {
+    if (window.Vol3D) window.Vol3D.setOpacity(parseInt(e.target.value, 10));
+  });
 
   $("#chkBlend").addEventListener("change", (e) => {
     state.blend = e.target.checked;

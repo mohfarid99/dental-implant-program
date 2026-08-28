@@ -52,21 +52,31 @@
         </label>
         <span class="mono" id="sliceLabel">— / —</span>
         <div class="seg" role="tablist" aria-label="viewer mode">
-          <button class="seg-btn is-active" data-view="base" title="Base CBCT">Base</button>
-          <button class="seg-btn" data-view="overlay" title="AB / MC / implant overlay">Overlay</button>
+          <button class="seg-btn is-active" data-view="base" title="Base CBCT (2D slice)">2D</button>
+          <button class="seg-btn" data-view="overlay" title="AB / MC / implant overlay (2D)">Overlay</button>
+          <button class="seg-btn" id="btn2d3d" title="Free-orbit 3D rendering">3D</button>
         </div>
         <label class="chk" title="Show overlay on top of base instead of replacing it">
           <input id="chkBlend" type="checkbox" /> <span>Blend</span>
         </label>
+        <span class="toolbar-3d" id="ctl3dThreshold">
+          <small>Threshold</small>
+          <input id="volThreshold" type="range" min="5" max="85" value="28" step="1" />
+        </span>
+        <span class="toolbar-3d" id="ctl3dOpacity">
+          <small>Opacity</small>
+          <input id="volOpacity" type="range" min="2" max="25" value="9" step="1" />
+        </span>
       </div>
     </div>
 
     <div class="viewer" id="viewer">
       <div class="viewer-stage">
-        <div class="img-stack">
+        <div class="img-stack" id="imgStack">
           <img id="imgBase" class="img-base" alt="CBCT slice" />
           <img id="imgOverlay" class="img-overlay" alt="AB / MC / implant" />
         </div>
+        <div class="vol3d" id="vol3d" hidden></div>
 
         <div class="viewer-empty" id="viewerEmpty">
           <div class="empty-icon">
@@ -302,6 +312,10 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<script type="importmap">
+  { "imports": { "three": "./vendor/three.module.js" } }
+</script>
+<script type="module" src="vol3d.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

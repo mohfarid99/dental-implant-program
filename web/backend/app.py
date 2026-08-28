@@ -40,6 +40,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import scipy.ndimage as ndi
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
@@ -291,6 +292,29 @@ def delete_session(sid: str):
 @app.get("/api/session/{sid}/slice/{z}/png")
 def slice_png(sid: str, z: int):
     return Response(content=get_session(sid).slice_png(z), media_type="image/png")
+
+@app.get("/api/session/{sid}/volume-raw")
+def volume_raw(sid: str, max_side: int = 96):
+    """Whole volume as raw uint8 for the 3D ray-marcher.
+    Downscaled so the largest axis is <= max_side (keeps payload ~1 MB)."""
+    vol = get_session(sid).volume()
+    vol = np.asarray(vol, dtype=np.float32)
+    z, y, x = vol.shape
+    f = max_side / float(max(z, y, x))
+    if f < 1.0:
+        vol = ndi.zoom(vol, zoom=(f, f, f), order=1)
+    # robust normalization: min .. 99th percentile
+    lo = float(vol.min())
+    hi = np.percentile(vol, 99)
+    if hi <= lo:
+        hi = lo + 1.0
+    vol = np.clip((vol - lo) / (hi - lo), 0.0, 1.0)
+    buf = vol.astype(np.uint8).tobytes()
+    dims = f"{vol.shape[2]},{vol.shape[1]},{vol.shape[0]}"   # w,h,d for Data3DTexture
+    return Response(
+        content=buf,
+        media_type="application/octet-stream",
+        headers={"X-Vol-Dims": dims, "Access-Control-Expose-Headers": "X-Vol-Dims"})
 
 @app.post("/api/session/{sid}/rotate")
 def rotate(sid: str, body: RotateIn):
