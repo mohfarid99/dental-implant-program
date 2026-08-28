@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Implant Studio · Clinical Planning</title>
+
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='86'%3E%F0%9F%A6%B7%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="currentColor" d="M12 2c-3.1 0-4.9 1.7-4.9 4.6 0 2.4 1.2 3.9 1.2 6.2 0 1.7-1 2.9-2.3 2.9h6.2c1.3 0 2.3-1.2 2.3-2.9 0-2.3 1.2-3.8 1.2-6.2C16.9 3.7 15.1 2 12 2zm-4.7 6c-.4-.4-.6-1-.6-1.6C6.7 5.3 8.6 4 12 4s5.3 1.3 5.3 2.4c0 .6-.2 1.2-.6 1.6.8 1.5-.2 3-.2 4.9 0 1 .3 1.9.9 2.6H5.6c.6-.7.9-1.6.9-2.6 0-1.9-1-3.4-.2-4.9z"/>
+      </svg>
+    </div>
+    <div class="brand-text">
+      <span class="brand-kicker">Implant Studio</span>
+      <h1>Clinical Planning</h1>
+    </div>
+  </div>
+
+  <nav class="steps" aria-label="pipeline steps">
+    <button class="step is-active" data-step="0"><span class="step-num">1</span>Session</button>
+    <button class="step" data-step="1"><span class="step-num">2</span>Angle</button>
+    <button class="step" data-step="2"><span class="step-num">3</span>Missing range</button>
+    <button class="step" data-step="3"><span class="step-num">4</span>Recommendation</button>
+    <button class="step" data-step="4"><span class="step-num">5</span>Results</button>
+  </nav>
+
+  <div class="header-actions">
+    <span class="system-state"><span class="system-state-dot"></span>Local workspace</span>
+  </div>
+</header>
+
+<main class="app-main">
+  <!-- ============ LEFT: workspace / viewer ============ -->
+  <section class="workspace" aria-label="workspace">
+    <div class="workspace-toolbar">
+      <div class="toolbar-left">
+        <span class="viewer-title">CBCT Viewer</span>
+        <span class="pill pill-ghost" id="patientPill" title="">no session</span>
+      </div>
+      <div class="toolbar-right">
+        <label class="toolbar-label">Slice
+          <input id="sliceSlider" type="range" min="0" max="10" value="0" aria-label="slice" />
+        </label>
+        <span class="mono" id="sliceLabel">— / —</span>
+        <div class="seg" role="tablist" aria-label="viewer mode">
+          <button class="seg-btn is-active" data-view="base" title="Base CBCT">Base</button>
+          <button class="seg-btn" data-view="overlay" title="AB / MC / implant overlay">Overlay</button>
+        </div>
+        <label class="chk" title="Show overlay on top of base instead of replacing it">
+          <input id="chkBlend" type="checkbox" /> <span>Blend</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="viewer" id="viewer">
+      <div class="viewer-stage">
+        <div class="img-stack">
+          <img id="imgBase" class="img-base" alt="CBCT slice" />
+          <img id="imgOverlay" class="img-overlay" alt="AB / MC / implant" />
+        </div>
+
+        <div class="viewer-empty" id="viewerEmpty">
+          <div class="empty-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="none" stroke="currentColor" stroke-width="1.4"
+                d="M4 7h16M4 12h16M4 17h16"/>
+              <path fill="currentColor" opacity=".35"
+                d="M9 4v16M15 4v16" />
+            </svg>
+          </div>
+          <p>Load a patient folder to start</p>
+          <em>expects <span class="mono">d_side_volume/side_volume.npy</span> (produced by the desktop app)</em>
+        </div>
+      </div>
+
+      <div class="viewer-legend" id="legend">
+        <div class="legend-item"><span class="legend-swatch swatch-ab"></span>Alveolar bone</div>
+        <div class="legend-item"><span class="legend-swatch swatch-mc"></span>Mandibular canal</div>
+        <div class="legend-item"><span class="legend-swatch swatch-imp"></span>Implant candidate</div>
+      </div>
+    </div>
+
+    <div class="workspace-status" id="workspaceStatus">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusLabel">Idle</span>
+      <div class="progress" id="progressWrap" hidden><div class="progress-bar" id="progressBar"></div></div>
+    </div>
+  </section>
+
+  <!-- ============ RIGHT: step panels ============ -->
+  <aside class="panel" aria-label="controls">
+    <div class="panel-scroll">
+
+      <!-- STEP 1 : SESSION -->
+      <article class="card step-panel is-active" data-step="0">
+        <header class="card-head">
+          <span class="section-eyebrow">Step 01</span>
+          <h2>Patient session</h2>
+          <span class="card-caption">Load the CBCT volume produced by the desktop pipeline</span>
+        </header>
+        <div class="card-body">
+          <label class="field">
+            <span class="field-label">Patient folder (absolute path)</span>
+            <input id="patientDir" class="input mono" type="text"
+              placeholder="/Users/.../Pasien/d_side_volume/.. " />
+            <span class="field-hint">Point at the folder <em>containing</em> <span class="mono">d_side_volume/side_volume.npy</span> <b>or</b> the <span class="mono">d_side_volume</span> folder itself.</span>
+          </label>
+          <div class="row">
+            <button id="btnLoadPatient" class="btn btn-primary btn-lg">Open session</button>
+          </div>
+          <div id="sessionMeta" class="meta" hidden>
+            <div class="meta-grid">
+              <div><small>Shape (Z,Y,X)</small><span class="mono" id="metaShape">—</span></div>
+              <div><small>Slices</small><span class="mono" id="metaSlices">—</span></div>
+              <div><small>Source</small><span class="mono" id="metaSource">—</span></div>
+              <div><small>Missing range</small><span class="mono" id="metaRange">—</span></div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- STEP 2 : ANGLE -->
+      <article class="card step-panel" data-step="1">
+        <header class="card-head">
+          <span class="section-eyebrow">Step 02</span>
+          <h2>Implant angle</h2>
+          <span class="card-caption">Rotate the volume so the implant axis matches the CBCT plane</span>
+        </header>
+        <div class="card-body">
+
+          <div class="row row-wrap">
+            <div class="field">
+              <span class="field-label">Angle (°)</span>
+              <input id="angle" class="input mono num" type="number" step="0.5" value="10" min="-360" max="360" />
+            </div>
+            <div class="field">
+              <span class="field-label">Rotation axis</span>
+              <select id="axis" class="input">
+                <option value="z">Z (axial)</option>
+                <option value="x">X (sagittal)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row">
+            <button id="btnRotateLeft"  class="btn">◀ Set for left teeth</button>
+            <button id="btnRotateRight" class="btn">Set for right teeth ▶</button>
+          </div>
+          <div class="row">
+            <button id="btnResetAngle" class="btn btn-ghost">↺ Reset rotation</button>
+          </div>
+
+          <p class="hint" id="rotationHint">
+            “Right” applies <span class="mono">(360 − angle)°</span> — mirror of the left rotation, same as the desktop app.
+          </p>
+        </div>
+      </article>
+
+      <!-- STEP 3 : MISSING RANGE -->
+      <article class="card step-panel" data-step="2">
+        <header class="card-head">
+          <span class="section-eyebrow">Step 03</span>
+          <h2>Missing-teeth slice range</h2>
+          <span class="card-caption">Where the extraction site sits along Z — drives segmentation</span>
+        </header>
+        <div class="card-body">
+          <div class="row">
+            <div class="field">
+              <span class="field-label">Start slice</span>
+              <input id="missStart" class="input num" type="number" min="0" />
+            </div>
+            <div class="field">
+              <span class="field-label">End slice</span>
+              <input id="missEnd" class="input num" type="number" min="1" />
+            </div>
+            <button id="btnSetRange" class="btn btn-primary">Apply</button>
+          </div>
+          <div class="row">
+            <button id="btnAutoRange" class="btn btn-accent">
+              ✦ Auto-detect with the classifier
+            </button>
+          </div>
+          <p class="hint">
+            Uses <span class="mono">classification.pt</span> — per-slice 2.5D EfficientNet-B0. May take ~1 min.
+          </p>
+        </div>
+      </article>
+
+      <!-- STEP 4 : RECOMMENDATION -->
+      <article class="card step-panel" data-step="3">
+        <header class="card-head">
+          <span class="section-eyebrow">Step 04</span>
+          <h2>Recommendation</h2>
+          <span class="card-caption">YOLOv8 segment AB &amp; MC, then pick the largest implant that fits</span>
+        </header>
+        <div class="card-body">
+          <button id="btnRun" class="btn btn-primary btn-lg btn-block">
+            ▶ &nbsp;Run full pipeline
+          </button>
+          <div class="row row-wrap" style="margin-top:10px">
+            <div class="kpi">
+              <small>Implants in DB</small>
+              <span class="kpi-v" id="kpiImplants">—</span>
+            </div>
+            <div class="kpi">
+              <small>Candidates found</small>
+              <span class="kpi-v" id="kpiCandidates">—</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- STEP 5 : RESULTS -->
+      <article class="card step-panel" data-step="4">
+        <header class="card-head">
+          <span class="section-eyebrow">Step 05</span>
+          <h2>Results</h2>
+          <span class="card-caption">Pick the implant you want to commit, or change the range &amp; re-run</span>
+        </header>
+        <div class="card-body">
+          <div id="noCandidates" class="callout callout-warn" hidden>
+            <strong>No suitable implant for this range.</strong>
+            <span id="noCandidatesWhy">—</span>
+          </div>
+
+          <div id="appliedBadge" class="applied-badge" hidden>
+            <div class="applied-main">
+              <span class="mono" id="appliedId">—</span>
+              <span>Ø<span id="appliedD">—</span> × <span id="appliedH">—</span> mm</span>
+            </div>
+            <div class="applied-sub mono" id="appliedMeta">—</div>
+          </div>
+
+          <div class="candidates-head" id="candidatesHead" hidden>
+            <span>Candidates (sorted by volume)</span>
+            <span class="candidates-count" id="candCount">0</span>
+          </div>
+          <ul class="candidates" id="candidates"></ul>
+
+          <details class="log-details" id="logDetails" hidden>
+            <summary>View full selection log</summary>
+            <pre id="logPre" class="log-pre"></pre>
+          </details>
+        </div>
+      </article>
+
+      <!-- IMPLANT DATABASE -->
+      <article class="card">
+        <header class="card-head">
+          <span class="section-eyebrow">Library</span>
+          <h2>Implant database</h2>
+          <span class="card-caption">Shared CSV — same file the desktop app reads</span>
+        </header>
+        <div class="card-body">
+          <form id="plantForm" class="plant-form" novalidate>
+            <input required name="id" class="input mono" type="text" placeholder="Model / ID" style="flex:2" />
+            <input required name="diameter_mm" class="input num" type="number" step="0.1" placeholder="Ø mm" style="flex:1" />
+            <input required name="height_mm" class="input num" type="number" step="0.1" placeholder="H mm" style="flex:1" />
+            <button class="btn" type="submit">Add</button>
+          </form>
+          <ul class="plant-list" id="plantList"></ul>
+        </div>
+      </article>
+
+    </div>
+  </aside>
+</main>
+
+<footer class="app-footer">
+  <span class="mono" id="footerSess">no session</span>
+  <span class="dotsep"></span>
+  <span>pixel size assumed <b>0.3 mm</b> · margins: 1 mm safety / 2 mm canal / 3 mm crest</span>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
