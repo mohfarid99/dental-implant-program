@@ -309,7 +309,7 @@ def volume_raw(sid: str, max_side: int = 96):
     if hi <= lo:
         hi = lo + 1.0
     vol = np.clip((vol - lo) / (hi - lo), 0.0, 1.0)
-    buf = vol.astype(np.uint8).tobytes()
+    buf = (vol * 255.0).round().astype(np.uint8).tobytes()
     dims = f"{vol.shape[2]},{vol.shape[1]},{vol.shape[0]}"   # w,h,d for Data3DTexture
     return Response(
         content=buf,
