@@ -200,7 +200,14 @@
     el.filePick.value = "";
     el.dzFile.hidden = true;
     el.btnOpenFile.hidden = true;
+    el.btnOpenFile.disabled = true;
     el.btnClearFile.hidden = true;
+  }
+
+  function showFileButtons() {
+    el.btnOpenFile.hidden = false;
+    el.btnOpenFile.disabled = false;
+    el.btnClearFile.hidden = false;
   }
 
   async function openFromFile() {
@@ -261,8 +268,7 @@
     state.pickedFile = f;
     el.dzFile.textContent = `${f.name}  (${(f.size / 1048576).toFixed(1)} MB)`;
     el.dzFile.hidden = false;
-    el.btnOpenFile.hidden = false;
-    el.btnClearFile.hidden = false;
+    showFileButtons();
   });
   el.btnClearFile.addEventListener("click", resetPickUI);
   el.btnOpenFile.addEventListener("click", openFromFile);
@@ -286,8 +292,7 @@
         state.pickedFile = f;
         el.dzFile.textContent = `${f.name}  (${(f.size / 1048576).toFixed(1)} MB)`;
         el.dzFile.hidden = false;
-        el.btnOpenFile.hidden = false;
-        el.btnClearFile.hidden = false;
+        showFileButtons();
       } else {
         toast(`File "${f.name}" bukan .npy — pilih file hasil pipeline desktop.`, "err", 6000);
       }
