@@ -17,6 +17,7 @@
     noImplantReason: null,
     plants: [],
     busy: false,
+    pickedFile: null,        // File object from the picker, not yet uploaded
   };
 
   // ------------------------------------------------------------- dom
@@ -24,6 +25,12 @@
   const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
   const el = {
+    dropzone:     $("#dropzone"),
+    dzFile:       $("#dzFile"),
+    filePick:     $("#filePick"),
+    btnPick:      $("#btnPick"),
+    btnOpenFile:  $("#btnOpenFile"),
+    btnClearFile: $("#btnClearFile"),
     patientDir:   $("#patientDir"),
     btnLoad:      $("#btnLoadPatient"),
     sessionMeta:  $("#sessionMeta"),
@@ -170,28 +177,66 @@
   });
 
   // ------------------------------------------------------------- session
-  async function loadSession() {
+  function setupSession(data, label, sourceLabel) {
+    state.sid = data.sid;
+    state.slices = data.slices;
+    state.shape = data.shape;
+    state.curSlice = Math.floor(data.slices / 2);
+    el.sliceSlider.max = data.slices - 1;
+    el.sliceSlider.value = state.curSlice;
+    el.viewerEmpty.classList.add("hidden");
+    el.patientPill.textContent = label;
+    el.patientPill.classList.add("pill-live");
+    el.footerSess.textContent = `session ${data.sid}`;
+    el.sessionMeta.hidden = false;
+    el.metaShape.textContent = data.shape.join(" × ");
+    el.metaSlices.textContent = data.slices;
+    el.metaSource.textContent = sourceLabel;
+    updateViewer();
+  }
+
+  function resetPickUI() {
+    state.pickedFile = null;
+    el.filePick.value = "";
+    el.dzFile.hidden = true;
+    el.btnOpenFile.hidden = true;
+    el.btnClearFile.hidden = true;
+  }
+
+  async function openFromFile() {
+    const f = state.pickedFile;
+    if (!f) return;
+    setBusy(true, "Uploading…", 0.05);
+    try {
+      const fd = new FormData();
+      fd.append("file", f, f.name);
+      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      let data = null;
+      try { data = await res.json(); } catch (_) { /* non-json */ }
+      if (!res.ok) {
+        const msg = data && (data.detail || data.message) ? (data.detail || data.message) : `HTTP ${res.status}`;
+        throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      }
+      setupSession(data, f.name, "uploaded");
+      const info = await api(`/api/session/${state.sid}`);
+      applySessionState(info);
+      resetPickUI();
+      toast("Session opened (uploaded).", "ok");
+      setStep(1);
+    } catch (err) {
+      toast(err.message, "err", 7000);
+    } finally {
+      setBusy(false, "Ready");
+    }
+  }
+
+  async function openFromServerPath() {
     const dir = el.patientDir.value.trim();
-    if (!dir) { toast("Enter the patient folder path first.", "err"); return; }
+    if (!dir) { toast("Isi path folder dulu.", "err"); return; }
     setBusy(true, "Opening session…");
     try {
       const data = await api("/api/session", { method: "POST", body: { patient_dir: dir } });
-      state.sid = data.sid;
-      state.slices = data.slices;
-      state.shape = data.shape;
-      state.curSlice = Math.floor(data.slices / 2);
-      el.sliceSlider.max = data.slices - 1;
-      el.sliceSlider.value = state.curSlice;
-      el.viewerEmpty.classList.add("hidden");
-      el.patientPill.textContent = dir.split("/").slice(-2).join(" / ");
-      el.patientPill.classList.add("pill-live");
-      el.footerSess.textContent = `session ${data.sid}`;
-      el.sessionMeta.hidden = false;
-      el.metaShape.textContent = data.shape.join(" × ");
-      el.metaSlices.textContent = data.slices;
-      el.metaSource.textContent = "original";
-      updateViewer();
-      // sync range inputs with what backend knows (0 .. zmax)
+      setupSession(data, dir.split("/").slice(-2).join(" / "), "original");
       const info = await api(`/api/session/${state.sid}`);
       applySessionState(info);
       toast("Session opened.", "ok");
@@ -202,7 +247,54 @@
       setBusy(false, "Ready");
     }
   }
-  el.btnLoad.addEventListener("click", loadSession);
+
+  // -- file picker wiring -------------------------------------------
+  function pickFile() { el.filePick.click(); }
+  el.dropzone.addEventListener("click", pickFile);
+  el.dropzone.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickFile(); }
+  });
+  el.btnPick.addEventListener("click", pickFile);
+  el.filePick.addEventListener("change", () => {
+    const f = el.filePick.files && el.filePick.files[0];
+    if (!f) return;
+    state.pickedFile = f;
+    el.dzFile.textContent = `${f.name}  (${(f.size / 1048576).toFixed(1)} MB)`;
+    el.dzFile.hidden = false;
+    el.btnOpenFile.hidden = false;
+    el.btnClearFile.hidden = false;
+  });
+  el.btnClearFile.addEventListener("click", resetPickUI);
+  el.btnOpenFile.addEventListener("click", openFromFile);
+
+  // drag & drop
+  ["dragenter", "dragover"].forEach((ev) =>
+    el.dropzone.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      el.dropzone.classList.add("is-over");
+    }));
+  ["dragleave", "drop"].forEach((ev) =>
+    el.dropzone.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      el.dropzone.classList.remove("is-over");
+    }));
+  el.dropzone.addEventListener("drop", (e) => {
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) {
+      const f = files[0];
+      if (f.name.toLowerCase().endsWith(".npy") || f.type.startsWith("application") || f.type === "") {
+        state.pickedFile = f;
+        el.dzFile.textContent = `${f.name}  (${(f.size / 1048576).toFixed(1)} MB)`;
+        el.dzFile.hidden = false;
+        el.btnOpenFile.hidden = false;
+        el.btnClearFile.hidden = false;
+      } else {
+        toast(`File "${f.name}" bukan .npy — pilih file hasil pipeline desktop.`, "err", 6000);
+      }
+    }
+  });
+
+  el.btnLoad.addEventListener("click", openFromServerPath);
 
   function applySessionState(info) {
     if (info.shape) {

@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -39,7 +40,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -56,6 +57,7 @@ SEGMENTATION_MODEL = os.path.join(PROJECT_DIR, "segmentation.pt")
 IMPLANTS_CSV = os.path.join(PROJECT_DIR, "implant_database.csv")
 WORK_ROOT = os.path.join(WEB_DIR, "work")
 os.makedirs(WORK_ROOT, exist_ok=True)
+MAX_UPLOAD_MB = 300          # side_volume.npy is tens of MB; keep headroom
 
 app = FastAPI(title="Dental Implant Planning — Web", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -190,6 +192,65 @@ class PlantIn(BaseModel):
     height_mm: float
 
 # ------------------------------------------------------------------- API
+_SAFE_NAME = re.compile(r"[\w.\-]+")
+
+def _safe_name(raw):
+    base = os.path.basename(raw.replace("\\", "/").replace("%20", " ").strip())
+    base = base[:120]
+    if not _SAFE_NAME.fullmatch(base) or base in (".", ".."):
+        raise HTTPException(400, "invalid file name")
+    return base
+
+@app.post("/api/upload")
+async def upload_volume(file: UploadFile):
+    """Browser upload: pick the `side_volume.npy` file from anywhere on your
+    machine — no server path needed. Creates a working session around it."""
+    name = _safe_name(file.filename or "side_volume.npy")
+    if not name.lower().endswith(".npy"):
+        name += ".npy"
+    # validate it really is a numpy .npy (magic header check, no full load)
+    head = await file.read(6)
+    if len(head) < 6 or (head[:4] != b"\x93NUM"):
+        raise HTTPException(400, "file is not a valid NumPy .npy array")
+
+    sid = uuid.uuid4().hex[:12]                       # same shape the UI expects
+    sid_dir = os.path.join(WORK_ROOT, sid)
+    d_side = os.path.join(sid_dir, "d_side_volume")   # Session(patient_dir=d_side)
+    os.makedirs(d_side, exist_ok=True)
+
+    dest = os.path.join(d_side, "side_volume.npy")
+    size = 0
+    try:
+        with open(dest, "wb") as out:
+            out.write(head)                     # keep the 6 magic bytes we read
+            size += len(head)
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_UPLOAD_MB * 1024 * 1024:
+                    raise HTTPException(413, f"file exceeds {MAX_UPLOAD_MB} MB limit")
+                out.write(chunk)
+    except Exception:
+        try:
+            os.remove(dest)          # never leave a partial .npy behind
+        except OSError:
+            pass
+        raise
+    finally:
+        await file.close()
+    if size == 0:
+        os.remove(dest)
+        raise HTTPException(400, "uploaded file is empty")
+
+    s = Session(sid, d_side)
+    SESSIONS[sid] = s
+    vol = s.volume()
+    return {"sid": sid, "patient_dir": d_side,
+            "shape": list(vol.shape), "slices": int(vol.shape[0]),
+            "source": name, "bytes": size}
+
 @app.post("/api/session")
 def create_session(body: PatientIn):
     root = os.path.abspath(body.patient_dir.strip())

@@ -108,15 +108,34 @@
           <span class="card-caption">Load the CBCT volume produced by the desktop pipeline</span>
         </header>
         <div class="card-body">
-          <label class="field">
-            <span class="field-label">Patient folder (absolute path)</span>
-            <input id="patientDir" class="input mono" type="text"
-              placeholder="/Users/.../Pasien/d_side_volume/.. " />
-            <span class="field-hint">Point at the folder <em>containing</em> <span class="mono">d_side_volume/side_volume.npy</span> <b>or</b> the <span class="mono">d_side_volume</span> folder itself.</span>
-          </label>
-          <div class="row">
-            <button id="btnLoadPatient" class="btn btn-primary btn-lg">Open session</button>
+          <div class="dropzone mono" id="dropzone" tabindex="0" role="button" aria-label="Choose a side_volume.npy file">
+            <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+              <path d="M12 16V4m0 0-4 4m4-4 4 4" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" stroke-linecap="round"/>
+            </svg>
+            <p class="dz-title">Pilih file <span class="mono">side_volume.npy</span></p>
+            <p class="dz-sub">klik untuk memilih, atau tarik &amp; letakkan di sini</p>
+            <span class="dz-filename" id="dzFile" hidden></span>
           </div>
+          <input id="filePick" class="sr-only" type="file" accept=".npy,application/octet-stream" />
+          <div class="row-between">
+            <button id="btnPick" class="btn">Browse…</button>
+            <button id="btnOpenFile" class="btn btn-primary btn-lg" disabled="disabled" hidden>Open this file</button>
+            <button id="btnClearFile" class="btn btn-ghost" hidden>✕</button>
+          </div>
+          <div class="divider"><span>atau</span></div>
+          <details class="adv">
+            <summary>Server-side path (advanced)</summary>
+            <div class="adv-body">
+              <label class="field" style="flex:1">
+                <span class="field-label">Folder pada server</span>
+                <input id="patientDir" class="input mono" type="text"
+                  placeholder="/path/ke/folder/yang/memiliki/d_side_volume/" />
+                <span class="field-hint">Folder <em>yang berisi</em> <span class="mono">d_side_volume/side_volume.npy</span>.</span>
+              </label>
+              <button id="btnLoadPatient" class="btn">Open session</button>
+            </div>
+          </details>
           <div id="sessionMeta" class="meta" hidden>
             <div class="meta-grid">
               <div><small>Shape (Z,Y,X)</small><span class="mono" id="metaShape">—</span></div>

@@ -390,6 +390,52 @@ select.input { cursor: pointer; }
 .plant-row.has-edit { background: rgba(56,189,248,.06); border-radius: 4px; }
 .plant-id.has-edit { color: var(--accent-2); }
 
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.row-between { display: flex; gap: 10px; align-items: center; justify-content: center; }
+.divider {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--text-2); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+}
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+.adv { border: 1px dashed var(--line); border-radius: 10px; padding: 0; }
+.adv > summary {
+  cursor: pointer; list-style: none; padding: 9px 13px;
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+}
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before { content: "›"; display: inline-block; margin-right: 8px; transition: transform .15s; }
+.adv[open] > summary::before { transform: rotate(90deg); }
+.adv-body { padding: 4px 13px 14px; display: flex; gap: 10px; align-items: flex-end; }
+
+/* step 01 — file picker */
+.dropzone {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 22px 16px; text-align: center; cursor: pointer; user-select: none;
+  border: 1.5px dashed var(--line); border-radius: 12px;
+  background: rgba(8, 13, 26, .55);
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.dropzone:hover, .dropzone:focus-visible {
+  border-color: rgba(56,189,248,.55); background: rgba(56,189,248,.05);
+}
+.dropzone.is-over {
+  border-color: var(--accent); background: rgba(56,189,248,.10);
+  box-shadow: 0 0 0 4px rgba(56,189,248,.15);
+}
+.dz-icon { width: 34px; height: 34px; color: var(--accent); opacity: .85; }
+.dz-title { margin: 4px 0 0; font-size: 13.5px; font-weight: 700; color: var(--text-0); }
+.dz-sub { margin: 0; font-size: 11.5px; color: var(--text-2); font-family: inherit; }
+.dz-filename {
+  margin-top: 6px; padding: 4px 10px; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; color: var(--ok);
+  border: 1px solid rgba(52,211,153,.4); background: rgba(52,211,153,.08);
+  border-radius: 999px;
+}
+
 /* toast */
 .toast {
   position: fixed; right: 20px; bottom: 20px; z-index: 100;
