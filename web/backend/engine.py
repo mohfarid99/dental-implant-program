@@ -20,7 +20,6 @@ import os
 import re
 import shutil
 from collections import OrderedDict
-from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -32,20 +31,6 @@ _CLF = dict(img_size=224, k=2, missing_label=0, use_clahe=False)
 # ---------------------------------------------------------------- helpers
 def natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
-
-def clean_binary_stack(arr, open_iter=1, close_iter=2, min_voxels=500):
-    arr = (arr > 0)
-    arr = ndi.binary_opening(arr, structure=np.ones((3, 3, 3)), iterations=open_iter)
-    arr = ndi.binary_closing(arr, structure=np.ones((3, 3, 3)), iterations=close_iter)
-    for z in range(arr.shape[0]):
-        arr[z] = ndi.binary_fill_holes(arr[z])
-    lbl, n = ndi.label(arr)
-    if n > 0:
-        sizes = np.bincount(lbl.ravel())
-        keep = sizes >= min_voxels
-        keep[0] = False
-        arr = keep[lbl]
-    return arr.astype(np.uint8)
 
 def slice_to_uint8(slc):
     s = np.asarray(slc)
@@ -581,4 +566,66 @@ def apply_implant(patient_dir, candidate, start, resolution, total_slices, ab_di
         np.save(patient_path_imp, np.stack(arrs, axis=0))
     return {"applied": {"id": rid, "diameter_mm": d_mm, "height_mm": h_mm,
                         "start_slice": abs_start, "end_slice": abs_end,
-                        "volume_mm3": _vol}}
+                        "volume_mm3": _vol,
+                        # in-plane pixel origin, so the viewer can place a
+                        # true-to-scale 3D model at the planned position
+                        "x_px": int(x_px), "y_px": int(y_px),
+                        "pixel_size_mm": PIXEL_SIZE_MM}}
+
+# ------------------------------------------------- napari-style label volumes
+_MASK_SPEC = {
+    # kind    -> (folder,          filename template)
+    "ab":       ("segmented_AB",  "merged_segs_{z}.jpg"),
+    "mc":       ("segmented_MC",  "merged_segs_{z}.jpg"),
+    "implant":  ("implant_only",  "implant_{z}.png"),
+}
+
+def mask_available(patient_dir, kind):
+    spec = _MASK_SPEC.get(kind)
+    if spec is None:
+        return False
+    d = os.path.join(patient_dir, spec[0])
+    if not os.path.isdir(d):
+        return False
+    return any(f.lower().endswith((".png", ".jpg", ".jpeg")) for f in os.listdir(d))
+
+def build_label_volume(patient_dir, kind, total_slices):
+    """Full (Z, H, W) uint8 0/1 stack for 'ab' | 'mc' | 'implant'.
+
+    Mirrors `_ensure_final_ab_mc_npys` in the desktop app: slices the
+    segmentation never produced stay black, so the stack always lines up
+    with the base volume along Z.
+    """
+    spec = _MASK_SPEC.get(kind)
+    if spec is None:
+        raise ValueError(f"unknown mask kind '{kind}'")
+    folder, tmpl = spec
+    d = os.path.join(patient_dir, folder)
+    if not os.path.isdir(d):
+        return None
+
+    # discover H, W from the first readable mask
+    H = W = None
+    for fn in sorted(os.listdir(d), key=natural_key):
+        if fn.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tiff")):
+            im = cv2.imread(os.path.join(d, fn), cv2.IMREAD_GRAYSCALE)
+            if im is not None:
+                H, W = im.shape[:2]
+                break
+    if H is None:
+        return None
+
+    out = np.zeros((int(total_slices), H, W), dtype=np.uint8)
+    found = False
+    for z in range(int(total_slices)):
+        fp = os.path.join(d, tmpl.format(z=z))
+        if not os.path.isfile(fp):
+            continue
+        im = cv2.imread(fp, cv2.IMREAD_GRAYSCALE)
+        if im is None:
+            continue
+        if im.shape[:2] != (H, W):
+            im = cv2.resize(im, (W, H), interpolation=cv2.INTER_NEAREST)
+        out[z] = (im > 127).astype(np.uint8)
+        found = True
+    return out if found else None

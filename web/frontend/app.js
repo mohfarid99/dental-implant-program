@@ -2,14 +2,15 @@
 (() => {
   "use strict";
 
+  const V = window.NapariView;
+
   // ------------------------------------------------------------- state
+  let pollTimer = null;
   const state = {
     sid: null,
     slices: 0,
     shape: null,
     curSlice: 0,
-    viewMode: "base",        // base | overlay
-    blend: false,
     missing: { start: null, end: null },
     candidates: [],
     applied: null,
@@ -18,6 +19,7 @@
     plants: [],
     busy: false,
     pickedFile: null,        // File object from the picker, not yet uploaded
+    selectedLayer: "base",
   };
 
   // ------------------------------------------------------------- dom
@@ -42,8 +44,6 @@
 
     sliceSlider:  $("#sliceSlider"),
     sliceLabel:   $("#sliceLabel"),
-    imgBase:      $("#imgBase"),
-    imgOverlay:   $("#imgOverlay"),
     viewerEmpty:  $("#viewerEmpty"),
     legend:       $("#legend"),
     statusDot:    $("#statusDot"),
@@ -81,8 +81,34 @@
 
     plantForm:    $("#plantForm"),
     plantList:    $("#plantList"),
+    dimsBand:     $("#dimsBand"),
     toast:        $("#toast"),
     footerSess:   $("#footerSess"),
+
+    // napari dock
+    layerList:    $("#layerList"),
+    dockCount:    $("#dockCount"),
+    lc:           $("#layerControls"),
+    lcName:       $("#lcName"),
+    lcOpacity:    $("#lcOpacity"),
+    lcOpacityOut: $("#lcOpacityOut"),
+    lcClimLo:     $("#lcClimLo"),
+    lcClimHi:     $("#lcClimHi"),
+    lcClimOut:    $("#lcClimOut"),
+    lcGamma:      $("#lcGamma"),
+    lcGammaOut:   $("#lcGammaOut"),
+    lcColormap:   $("#lcColormap"),
+    lcColormapBar:$("#lcColormapBar"),
+    lcBlending:   $("#lcBlending"),
+    lcRendering:  $("#lcRendering"),
+    lcRenderingRow: $("#lcRenderingRow"),
+    lcIso:        $("#lcIso"),
+    lcIsoOut:     $("#lcIsoOut"),
+    lcIsoRow:     $("#lcIsoRow"),
+    lcAtten:      $("#lcAtten"),
+    lcAttenOut:   $("#lcAttenOut"),
+    lcAttenRow:   $("#lcAttenRow"),
+    lc2dNote:     $("#lc2dNote"),
   };
 
   // ------------------------------------------------------------- api
@@ -96,7 +122,9 @@
     try { data = await res.json(); } catch (_) { /* non-json */ }
     if (!res.ok) {
       const msg = data && (data.detail || data.message) ? (data.detail || data.message) : `HTTP ${res.status}`;
-      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      const err = new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      err.status = res.status;
+      throw err;
     }
     return data;
   }
@@ -123,123 +151,323 @@
   }
 
   // ------------------------------------------------------------- steps
-  let currentStep = 0;
-  function setStep(n, opts = {}) {
-    currentStep = n;
+  function setStep(n) {
     $$(".step").forEach((s, i) => {
       s.classList.toggle("is-active", i === n);
-      s.classList.toggle("is-done", i < n || (opts.done === true && i === n - 1) ? false : i < n);
+      s.classList.toggle("is-done", i < n);
     });
     $$(".step-panel").forEach((p) => p.classList.toggle("is-active", +p.dataset.step === n));
   }
   $$(".step").forEach((s) => s.addEventListener("click", () => setStep(+s.dataset.step)));
 
-  // ------------------------------------------------------------- viewer
-  function sliceUrl(z) { return `/api/session/${state.sid}/slice/${z}/png`; }
-  function overlayUrl(z) { return `/api/session/${state.sid}/overlay/${z}.png?t=${Date.now()}`; }
+  // ============================================================== viewer
+  const EYE_ON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z"/><circle cx="12" cy="12" r="2.8"/></svg>`;
+  const EYE_OFF = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l16 16M9.9 5.7A10.6 10.6 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a18 18 0 0 1-3.3 4M6.4 7.9A17.6 17.6 0 0 0 2 12s3.6 6.5 10 6.5a10.9 10.9 0 0 0 3.9-.7"/></svg>`;
 
-  function updateViewer() {
-    if (!state.sid) return;
-    if (state.viewMode === "base") {
-      el.imgBase.src = sliceUrl(state.curSlice);
-      el.imgOverlay.classList.add("hide");
-    } else {
-      el.imgBase.src = sliceUrl(state.curSlice);
-      el.imgOverlay.classList.remove("hide");
-      el.imgOverlay.src = overlayUrl(state.curSlice);
-      el.imgOverlay.addEventListener("error", () => {
-        el.imgOverlay.classList.add("hide");
-        toast("No overlay for this slice yet — run the pipeline first.", "info");
-      }, { once: true });
-    }
-    if (state.blend) el.imgOverlay.classList.remove("img-blend");
-    el.sliceLabel.textContent = `${state.curSlice} / ${state.slices - 1}`;
-    el.sliceSlider.value = state.curSlice;
-    // If the 3D view is active, refresh it with the new volume too
-    if (window.Vol3D && window.Vol3D.active && state.sid) {
-      window.Vol3D.refresh(state.sid).catch(() => {});
+  async function bootViewer() {
+    try {
+      V.quality = parseInt($("#volQuality").value, 10) || V.quality;
+      await V.boot($("#vol3d"));
+      V.onChange(renderDock);
+      setNdisplay(V.ndisplay);
+    } catch (e) {
+      toast(e.message, "err", 9000);
     }
   }
 
-  // view-mode segment buttons (2D / Overlay / 3D)
-  $$(".seg-btn").forEach((b) => b.addEventListener("click", () => {
-    if (b.id === "btn2d3d") { enter3D(); return; }
-    // 2D buttons: exit 3D first if active
-    if (window.Vol3D && window.Vol3D.active) {
-      window.Vol3D.hide();
-      $("#imgStack").style.display = "";
-    }
-    $$(".seg-btn").forEach((x) => x.classList.remove("is-active"));
-    b.classList.add("is-active");
-    state.viewMode = b.dataset.view;
-    showToolbar3d(false);
-    updateViewer();
-  }));
+  function renderDock() {
+    const layers = V.layers || [];
+    el.dockCount.textContent = String(layers.filter((l) => l.available).length);
+    el.layerList.innerHTML = "";
 
-  function showToolbar3d(on) {
-    $("#ctl3dThreshold").style.display = on ? "inline-flex" : "none";
-    $("#ctl3dOpacity").style.display = on ? "inline-flex" : "none";
+    if (!layers.length) {
+      const li = document.createElement("li");
+      li.className = "layer-empty";
+      li.textContent = "No volume loaded yet.";
+      el.layerList.appendChild(li);
+      el.lc.hidden = true;
+      return;
+    }
+
+    // napari draws the topmost layer first in its list
+    [...layers].reverse().forEach((L) => {
+      const li = document.createElement("li");
+      li.className = "layer-row"
+        + (L.kind === state.selectedLayer ? " is-selected" : "")
+        + (L.available ? "" : " is-missing");
+
+      const eye = document.createElement("button");
+      eye.type = "button";
+      eye.className = "layer-eye";
+      eye.innerHTML = L.visible ? EYE_ON : EYE_OFF;
+      eye.title = L.visible ? "Hide layer" : "Show layer";
+      eye.setAttribute("aria-pressed", String(L.visible));
+      eye.disabled = !L.available;
+      eye.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        V.set(L.kind, { visible: !L.visible });
+      });
+
+      const thumb = document.createElement("span");
+      thumb.className = "layer-thumb";
+      thumb.style.background = L.synthetic
+        ? `linear-gradient(90deg, ${V.rangeColors.start} 0 50%, ${V.rangeColors.end} 50% 100%)`
+        : L.rendering === "screw"
+          ? "linear-gradient(135deg,#f2f6fa 0%,#aeb9c4 45%,#eef3f8 60%,#96a3b0 100%)"
+          : V.cmapCss(L.colormap);
+
+      const name = document.createElement("span");
+      name.className = "layer-name";
+      name.textContent = L.name;
+
+      const tag = document.createElement("span");
+      tag.className = "layer-tag";
+      tag.textContent = L.synthetic ? "range" : (L.available ? L.rendering : "pending");
+
+      li.append(eye, thumb, name, tag);
+      li.addEventListener("click", () => {
+        state.selectedLayer = L.kind;
+        renderDock();
+      });
+      el.layerList.appendChild(li);
+    });
+
+    syncLayerControls();
   }
 
-  let _vol3dPromise = null;
-  function ensureVol3d() {
-    if (!window.Vol3D) return null;
-    if (!window.Vol3D.ready) {
-      // lazy-import the module if it hasn't booted yet
-      if (!_vol3dPromise) _vol3dPromise = import("./vol3d.js");
-      return _vol3dPromise;
-    }
-    return Promise.resolve(window.Vol3D);
+  function selectedLayer() {
+    return (V.layers || []).find((l) => l.kind === state.selectedLayer) || null;
   }
 
-  async function enter3D() {
-    if (!state.sid) { toast("Open a session first.", "err"); return; }
-    $$(".seg-btn").forEach((x) => x.classList.remove("is-active"));
-    $("#btn2d3d").classList.add("is-active");
-    showToolbar3d(true);
-    if (window.Vol3D) {
-      const V = await ensureVol3d();
-      if (!V) { toast("3D module failed to load.", "err"); return; }
-      try {
-        await V.show(state.sid);
-        V.setThreshold(parseInt($("#volThreshold").value, 10));
-        V.setOpacity(parseInt($("#volOpacity").value, 10));
-        $("#imgStack").style.display = "none";
-      } catch (e) {
-        toast("3D failed: " + e.message, "err", 7000);
+  let syncing = false;
+  function syncLayerControls() {
+    const L = selectedLayer();
+    if (!L || !L.available) { el.lc.hidden = true; return; }
+    syncing = true;
+    el.lc.hidden = false;
+    el.lcName.textContent = L.name;
+
+    el.lcOpacity.value = Math.round(L.opacity * 100);
+    el.lcOpacityOut.value = L.opacity.toFixed(2);
+
+    // the missing-range marker is geometry, not a volume — opacity is all it has
+    if (L.synthetic) {
+      for (const row of [el.lcClimLo.closest(".lc-row"), el.lcGamma.closest(".lc-row"),
+                         el.lcColormap.closest(".lc-row"), el.lcBlending.closest(".lc-row"),
+                         el.lcRenderingRow, el.lcIsoRow, el.lcAttenRow]) {
+        if (row) row.hidden = true;
       }
-    } else {
-      toast("3D module not ready — reload the page.", "err", 6000);
+      el.lc2dNote.hidden = false;
+      el.lc2dNote.textContent =
+        "Red planes mark the first and last slice of the missing-teeth range.";
+      syncing = false;
+      return;
     }
+    for (const row of [el.lcClimLo.closest(".lc-row"), el.lcGamma.closest(".lc-row"),
+                       el.lcColormap.closest(".lc-row"), el.lcBlending.closest(".lc-row")]) {
+      if (row) row.hidden = false;
+    }
+    el.lc2dNote.textContent =
+      "Rendering, iso threshold and attenuation apply to the 3D view only.";
+
+    const [lo, hi] = L.range;
+    const toSlider = (v) => Math.round(((v - lo) / Math.max(hi - lo, 1e-9)) * 1000);
+    el.lcClimLo.value = toSlider(L.climLo);
+    el.lcClimHi.value = toSlider(L.climHi);
+    el.lcClimOut.value = `${fmtNum(L.climLo)} – ${fmtNum(L.climHi)}`;
+
+    el.lcGamma.value = Math.round(L.gamma * 100);
+    el.lcGammaOut.value = L.gamma.toFixed(2);
+
+    fillSelect(el.lcColormap, V.cmaps, L.colormap);
+    el.lcColormapBar.style.background = V.cmapCss(L.colormap);
+    fillSelect(el.lcBlending, V.blendings, L.blending);
+    fillSelect(el.lcRendering,
+               L.kind === "implant" ? V.implantModes : V.renderModes,
+               L.rendering);
+
+    el.lcIso.value = Math.round(L.iso * 100);
+    el.lcIsoOut.value = L.iso.toFixed(2);
+    el.lcAtten.value = Math.round(L.attenuation * 200);
+    el.lcAttenOut.value = L.attenuation.toFixed(2);
+
+    const is3d = V.ndisplay === 3;
+    el.lcRenderingRow.hidden = false;
+    el.lcIsoRow.hidden = !(is3d && L.rendering === "iso");
+    if (L.rendering === "screw") {
+      el.lc2dNote.hidden = false;
+      el.lc2dNote.textContent =
+        `Titanium screw model at the planned position — Ø${fmtNum(state.applied?.diameter_mm)}`
+        + ` × ${fmtNum(state.applied?.height_mm)} mm. Switch rendering to see the raw mask.`;
+    }
+    el.lcAttenRow.hidden = !(is3d && L.rendering === "attenuated_mip");
+    el.lcRenderingRow.classList.toggle("is-disabled", !is3d);
+    el.lcRendering.disabled = !is3d;
+    el.lc2dNote.hidden = is3d;
+    syncing = false;
   }
 
-  $("#volThreshold").addEventListener("input", (e) => {
-    if (window.Vol3D) window.Vol3D.setThreshold(parseInt(e.target.value, 10));
-  });
-  $("#volOpacity").addEventListener("input", (e) => {
-    if (window.Vol3D) window.Vol3D.setOpacity(parseInt(e.target.value, 10));
-  });
+  function fillSelect(sel, options, value) {
+    if (sel.dataset.filled !== options.join("|")) {
+      sel.innerHTML = "";
+      options.forEach((o) => {
+        const opt = document.createElement("option");
+        opt.value = o;
+        opt.textContent = o;
+        sel.appendChild(opt);
+      });
+      sel.dataset.filled = options.join("|");
+    }
+    sel.value = value;
+  }
 
-  $("#chkBlend").addEventListener("change", (e) => {
-    state.blend = e.target.checked;
-    el.imgOverlay.classList.toggle("img-blend", !state.blend);
+  function patch(p) {
+    if (syncing) return;
+    const L = selectedLayer();
+    if (L) V.set(L.kind, p);
+  }
+
+  el.lcOpacity.addEventListener("input", (e) => patch({ opacity: +e.target.value / 100 }));
+  el.lcGamma.addEventListener("input", (e) => patch({ gamma: +e.target.value / 100 }));
+  el.lcColormap.addEventListener("change", (e) => patch({ colormap: e.target.value }));
+  el.lcBlending.addEventListener("change", (e) => patch({ blending: e.target.value }));
+  el.lcRendering.addEventListener("change", (e) => patch({ rendering: e.target.value }));
+  el.lcIso.addEventListener("input", (e) => patch({ iso: +e.target.value / 100 }));
+  el.lcAtten.addEventListener("input", (e) => patch({ attenuation: +e.target.value / 200 }));
+
+  function climFromSliders() {
+    const L = selectedLayer();
+    if (!L) return;
+    const [lo, hi] = L.range;
+    const span = Math.max(hi - lo, 1e-9);
+    let a = lo + (+el.lcClimLo.value / 1000) * span;
+    let b = lo + (+el.lcClimHi.value / 1000) * span;
+    if (a > b) { const t = a; a = b; b = t; }
+    if (b - a < span * 1e-3) b = a + span * 1e-3;
+    patch({ climLo: a, climHi: b });
+  }
+  el.lcClimLo.addEventListener("input", climFromSliders);
+  el.lcClimHi.addEventListener("input", climFromSliders);
+
+  // -- ndisplay / camera / capture -----------------------------------
+  function setNdisplay(n) {
+    V.setNdisplay(n);
+    $("#btnNd2").classList.toggle("is-active", n === 2);
+    $("#btnNd3").classList.toggle("is-active", n === 3);
+    $("#dimsBar").classList.toggle("is-idle", n === 3);
+    el.sliceSlider.disabled = n === 3;
+    syncLayerControls();
+  }
+  $("#btnNd2").addEventListener("click", () => setNdisplay(2));
+  $("#btnNd3").addEventListener("click", () => setNdisplay(3));
+  $("#btnResetView").addEventListener("click", () => V.resetView());
+  $("#btnShot").addEventListener("click", () => {
+    const url = V.screenshot();
+    if (!url) { toast("Nothing to capture yet.", "err"); return; }
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `implant-view-${state.sid || "session"}-z${state.curSlice}.png`;
+    a.click();
+    toast("Screenshot saved.", "ok");
+  });
+  $("#volQuality").addEventListener("change", async (e) => {
+    if (!state.sid) return;
+    setBusy(true, "Reloading volume…");
+    try {
+      await V.setQuality(parseInt(e.target.value, 10));
+    } catch (err) {
+      if (isSessionGone(err)) sessionLost("The server no longer has this session");
+      else toast(err.message, "err", 6000);
+    } finally { setBusy(false, "Ready"); }
+  });
+  $("#btnToggleDock").addEventListener("click", () => {
+    document.getElementById("appMain").classList.toggle("dock-hidden");
   });
 
   el.sliceSlider.addEventListener("input", (e) => {
     state.curSlice = +e.target.value;
-    el.sliceLabel.textContent = `${state.curSlice} / ${state.slices - 1}`;
-    updateViewer();
+    el.sliceLabel.textContent = `${state.curSlice} / ${Math.max(0, state.slices - 1)}`;
+    V.setSlice(state.curSlice, state.slices);
   });
 
+  /** The backend forgot this session (restart with no volume on disk). */
+  function sessionLost(msg) {
+    clearTimeout(pollTimer);
+    state.sid = null;
+    state.slices = 0;
+    state.candidates = [];
+    state.applied = null;
+    state.logs = [];
+    el.viewerEmpty.classList.remove("hidden");
+    el.legend.hidden = true;
+    el.sessionMeta.hidden = true;
+    el.patientPill.textContent = "no session";
+    el.patientPill.classList.remove("pill-live");
+    el.footerSess.textContent = "no session";
+    el.btnRun.disabled = false;
+    setMissingRange(null, null);
+    renderResults();
+    setStatus("err", "Session ended");
+    toast(msg + " — open the volume again to continue.", "err", 8000);
+    setStep(0);
+  }
+
+  function isSessionGone(e) {
+    return e && (e.status === 404 || /unknown session/i.test(e.message || ""));
+  }
+
+  /** Push the applied implant to the viewer so it can draw the 3D model. */
+  function syncImplantModel() {
+    V.setImplant(state.applied && state.shape ? state.applied : null, state.shape);
+  }
+
+  /** Reload every layer from the backend (after rotate / run / apply). */
+  async function refreshLayers() {
+    if (!state.sid) return;
+    try {
+      await V.reload();
+    } catch (e) {
+      if (isSessionGone(e)) sessionLost("The server no longer has this session");
+      else toast("Viewer reload failed: " + e.message, "err", 6000);
+    }
+  }
+
+  /** Record the missing range and show its boundary markers + slider band. */
+  function setMissingRange(start, end) {
+    state.missing.start = start;
+    state.missing.end = end;
+    const has = start != null && end != null;
+    el.metaRange.textContent = has ? `[${start}, ${end}]` : "—";
+    if (has) {
+      el.missStart.value = start;
+      el.missEnd.value = end;
+    }
+    V.setMissingRange(has ? start : null, has ? end : null);
+    const band = el.dimsBand;
+    if (!band) return;
+    const last = Math.max(1, state.slices - 1);
+    band.hidden = !has;
+    if (has) {
+      band.style.left = `${(start / last) * 100}%`;
+      band.style.width = `${((end - start) / last) * 100}%`;
+    }
+  }
+
+  function syncSliceUi() {
+    el.sliceSlider.max = Math.max(0, state.slices - 1);
+    el.sliceSlider.value = state.curSlice;
+    el.sliceLabel.textContent = `${state.curSlice} / ${Math.max(0, state.slices - 1)}`;
+    V.setSlice(state.curSlice, state.slices);
+  }
+
   // ------------------------------------------------------------- session
-  function setupSession(data, label, sourceLabel) {
+  async function setupSession(data, label, sourceLabel) {
     state.sid = data.sid;
     state.slices = data.slices;
     state.shape = data.shape;
     state.curSlice = Math.floor(data.slices / 2);
-    el.sliceSlider.max = data.slices - 1;
-    el.sliceSlider.value = state.curSlice;
     el.viewerEmpty.classList.add("hidden");
+    el.legend.hidden = false;
     el.patientPill.textContent = label;
     el.patientPill.classList.add("pill-live");
     el.footerSess.textContent = `session ${data.sid}`;
@@ -247,7 +475,8 @@
     el.metaShape.textContent = data.shape.join(" × ");
     el.metaSlices.textContent = data.slices;
     el.metaSource.textContent = sourceLabel;
-    updateViewer();
+    await V.attach(state.sid, $("#vol3d"));
+    syncSliceUi();
   }
 
   function resetPickUI() {
@@ -279,7 +508,7 @@
         const msg = data && (data.detail || data.message) ? (data.detail || data.message) : `HTTP ${res.status}`;
         throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
       }
-      setupSession(data, f.name, "uploaded");
+      await setupSession(data, f.name, "uploaded");
       const info = await api(`/api/session/${state.sid}`);
       applySessionState(info);
       resetPickUI();
@@ -298,7 +527,7 @@
     setBusy(true, "Opening session…");
     try {
       const data = await api("/api/session", { method: "POST", body: { patient_dir: dir } });
-      setupSession(data, dir.split("/").slice(-2).join(" / "), "original");
+      await setupSession(data, dir.split("/").slice(-2).join(" / "), "original");
       const info = await api(`/api/session/${state.sid}`);
       applySessionState(info);
       toast("Session opened.", "ok");
@@ -360,22 +589,21 @@
     if (info.shape) {
       state.slices = info.slices;
       state.shape = info.shape;
-      el.sliceSlider.max = state.slices - 1;
       el.metaShape.textContent = info.shape.join(" × ");
       el.metaSlices.textContent = info.slices;
       el.metaSource.textContent = info.volume_source;
+      state.curSlice = Math.min(state.curSlice, Math.max(0, info.slices - 1));
+      syncSliceUi();
     }
-    if (info.missing_start != null || info.missing_end != null) {
-      state.missing.start = info.missing_start;
-      state.missing.end = info.missing_end;
-      el.missStart.value = info.missing_start ?? "";
-      el.missEnd.value = info.missing_end ?? "";
-      el.metaRange.textContent = `[${info.missing_start}, ${info.missing_end}]`;
+    if (info.missing_start != null && info.missing_end != null) {
+      setMissingRange(info.missing_start, info.missing_end);
     }
     if (info.status && info.status !== "idle" && !state.busy) {
-      setStatus(info.status === "done" ? "ok" : info.status === "error" ? "err" : "busy", info.message || info.status, info.progress);
+      setStatus(info.status === "done" ? "ok" : info.status === "error" ? "err" : "busy",
+                info.message || info.status, info.progress);
     }
     renderResultsFromState(info);
+    syncImplantModel();
   }
 
   // ------------------------------------------------------------- rotation
@@ -386,22 +614,20 @@
     const sideLabel = side === "left" ? "Left" : "Right";
     setBusy(true, `Rotating (${sideLabel})…`);
     api(`/api/session/${state.sid}/rotate`, { method: "POST", body: { angle, axis, side } })
-      .then((d) => {
+      .then(async (d) => {
         state.slices = d.shape[0];
         state.shape = d.shape;
         state.curSlice = Math.floor(state.slices / 2);
-        el.sliceSlider.max = state.slices - 1;
         el.metaShape.textContent = d.shape.join(" × ");
         el.metaSlices.textContent = state.slices;
         el.metaSource.textContent = "rotated";
-        el.metaRange.textContent = `[0, ${state.slices - 1}]`;
+        state.applied = null;
+        await refreshLayers();
+        setMissingRange(null, null);
+        syncImplantModel();
         el.missStart.value = 0;
         el.missEnd.value = state.slices - 1;
-        state.missing.start = 0;
-        state.missing.end = state.slices - 1;
-        state.viewMode = "base";
-        $$(".seg-btn").forEach((x) => x.classList.toggle("is-active", x.dataset.view === "base"));
-        updateViewer();
+        syncSliceUi();
         toast(`Rotated ${sideLabel} ${d.applied_angle}° around ${axis.toUpperCase()}.`, "ok");
         setStep(2);
       })
@@ -412,14 +638,19 @@
   el.btnRotR.addEventListener("click", () => doRotate("right"));
 
   el.btnResetA.addEventListener("click", () => {
+    if (!state.sid) { toast("Open a session first.", "err"); return; }
     setBusy(true, "Resetting…");
     api(`/api/session/${state.sid}/reset-rotation`, { method: "POST" })
-      .then((d) => {
+      .then(async (d) => {
         state.slices = d.shape[0];
         state.shape = d.shape;
-        el.sliceSlider.max = state.slices - 1;
         state.curSlice = Math.floor(state.slices / 2);
-        updateViewer();
+        el.metaShape.textContent = d.shape.join(" × ");
+        el.metaSlices.textContent = state.slices;
+        el.metaSource.textContent = "original";
+        await refreshLayers();
+        setMissingRange(null, null);
+        syncSliceUi();
         toast("Volume reset to original.", "ok");
       })
       .catch((e) => toast(e.message, "err"))
@@ -443,8 +674,7 @@
     setBusy(true, "Setting range…");
     api(`/api/session/${state.sid}/missing-range`, { method: "POST", body: { start: r.s, end: r.e } })
       .then(() => {
-        state.missing = { start: r.s, end: r.e };
-        el.metaRange.textContent = `[${r.s}, ${r.e}]`;
+        setMissingRange(r.s, r.e);
         toast(`Missing range set to [${r.s}, ${r.e}].`, "ok");
         setStep(3);
       })
@@ -457,10 +687,9 @@
     setBusy(true, "Auto-detecting missing slices (this can take ~1 min)…", 0.1);
     api(`/api/session/${state.sid}/missing-auto`, { method: "POST" })
       .then((d) => {
-        state.missing = { start: d.start, end: d.end };
-        el.missStart.value = d.start;
-        el.missEnd.value = d.end;
-        el.metaRange.textContent = `[${d.start}, ${d.end}]`;
+        setMissingRange(d.start, d.end);
+        state.curSlice = Math.max(0, (d.start + d.end) >> 1);
+        syncSliceUi();
         toast(`Auto-detected missing range [${d.start}, ${d.end}].`, "ok");
         setStep(3);
       })
@@ -489,16 +718,15 @@
       });
   });
 
-  let pollTimer = null;
   function pollStatus(attempts = 0) {
     clearTimeout(pollTimer);
     if (attempts > 600) { // ~15 min safety net
       el.btnRun.disabled = false;
-      setBusy(false, "Timed out waiting for backend — check server logs.", "err");
+      setStatus("err", "Timed out waiting for backend — check server logs.");
       return;
     }
     api(`/api/session/${state.sid}`)
-      .then((info) => {
+      .then(async (info) => {
         applySessionState(info);
         const st = info.status;
         if (st === "running") {
@@ -512,10 +740,10 @@
           state.logs = info.logs || [];
           state.noImplantReason = info.no_implant_reason;
           $$(".step").forEach((s, i) => s.classList.toggle("is-done", i <= 3));
-          state.viewMode = "overlay";
-          $$(".seg-btn").forEach((x) => x.classList.toggle("is-active", x.dataset.view === "overlay"));
           state.curSlice = Math.max(0, (state.missing.start + state.missing.end) >> 1);
-          updateViewer();
+          await refreshLayers();          // AB / MC / implant layers now exist
+          syncSliceUi();
+          syncImplantModel();
           renderResults();
           setStep(4);
           toast(state.applied ? `Applied ${state.applied.id}` : "Pipeline done — no candidate fit.", "ok");
@@ -524,18 +752,18 @@
           setStatus("err", info.message || "failed");
           toast(info.message || "Pipeline failed", "err", 8000);
         } else if (st === "idle") {
-          // could be a fresh session; nothing more to do
           el.btnRun.disabled = false;
           setStatus("", "Ready");
         }
       })
-      .catch(() => {
+      .catch((e) => {
         el.btnRun.disabled = false;
-        setStatus("err", "lost connection to server");
+        if (isSessionGone(e)) sessionLost("The server no longer has this session");
+        else setStatus("err", "lost connection to server");
       });
   }
 
-  // ------------------------------------------------------------- results rendering
+  // ------------------------------------------------------------- results
   function renderResultsFromState(info) {
     state.candidates = info.candidates || [];
     state.applied = info.applied || null;
@@ -560,6 +788,7 @@
       }[state.noImplantReason] || "See the selection log below for per-implant reasons.";
       el.noCandWhy.textContent = why;
       el.kpiCand.textContent = "0";
+      el.logPre.textContent = state.logs.join("\n");
       return;
     }
 
@@ -576,11 +805,11 @@
     }
 
     el.candList.innerHTML = "";
+    const appliedIdx = state.applied ? state.candidates.findIndex(
+      (x) => x[0] === state.applied.id && x[1] === state.applied.diameter_mm
+        && x[2] === state.applied.height_mm) : -1;
     state.candidates.forEach((c, i) => {
       const [rid, d, h, , , si, ei, vol] = c;
-      const appliedIdx = state.applied ? state.candidates.findIndex(
-        (x) => x[0] === state.applied.id && x[1] === state.applied.diameter_mm
-          && x[2] === state.applied.height_mm) : -1;
       const isApplied = i === appliedIdx;
       const li = document.createElement("li");
       const btn = document.createElement("button");
@@ -607,15 +836,15 @@
     if (!state.sid) return;
     setBusy(true, "Applying implant…");
     api(`/api/session/${state.sid}/apply`, { method: "POST", body: { index: i } })
-      .then((d) => {
+      .then(async (d) => {
         state.applied = d.applied;
-        state.viewMode = "overlay";
-        $$(".seg-btn").forEach((x) => x.classList.toggle("is-active", x.dataset.view === "overlay"));
         if (state.applied.start_slice != null) {
           state.curSlice = Math.max(0, Math.min(state.slices - 1,
             (state.applied.start_slice + state.applied.end_slice) >> 1));
         }
-        updateViewer();
+        await refreshLayers();
+        syncSliceUi();
+        syncImplantModel();
         renderResults();
         toast(`Applied ${d.applied.id}.`, "ok");
       })
@@ -647,7 +876,7 @@
       const id = document.createElement("span"); id.className = "plant-id"; id.textContent = p.id;
       const d = document.createElement("span"); d.className = "plant-num"; d.textContent = fmtNum(p.diameter_mm);
       const h = document.createElement("span"); h.className = "plant-num"; h.textContent = fmtNum(p.height_mm);
-      const act = document.createElement("span"); act.style.display = "flex"; act.style.gap = "4px";
+      const act = document.createElement("span"); act.className = "plant-actions";
       const ed = document.createElement("button");
       ed.className = "btn btn-ghost btn-sm"; ed.textContent = "Edit";
       ed.addEventListener("click", () => editPlant(p.id));
@@ -719,15 +948,34 @@
     if (busy) {
       setStatus("busy", label, progress);
       el.btnLoad.disabled = true;
-      el.btnRun.disabled = false; // controlled by run/poll flow
     } else {
-      setStatus(progress === "err" ? "err" : "ok", label);
+      setStatus("ok", label);
       el.btnLoad.disabled = false;
     }
   }
 
+  // ------------------------------------------------------------- keyboard
+  window.addEventListener("keydown", (e) => {
+    const tag = (e.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "select" || tag === "textarea") return;
+    if (e.key === "2") setNdisplay(2);
+    else if (e.key === "3") setNdisplay(3);
+    else if (e.key === "r") V.resetView();
+    else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      if (!state.sid) return;
+      const step = e.key === "ArrowLeft" ? -1 : 1;
+      if (V.ndisplay === 3) setNdisplay(2);
+      state.curSlice = Math.max(0, Math.min(state.slices - 1, state.curSlice + step));
+      syncSliceUi();
+      e.preventDefault();
+    }
+  });
+
   // ------------------------------------------------------------- init
+  bootViewer();
+  setNdisplay(3);
   loadPlants();
+  renderDock();
   setStatus("", "Ready");
   setStep(0);
 })();

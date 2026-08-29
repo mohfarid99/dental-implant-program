@@ -15,6 +15,8 @@ Endpoints
   POST   /api/session/{sid}/run            full pipeline: segment + recommend + apply best
   POST   /api/session/{sid}/apply          apply a different candidate {index}
   GET    /api/session/{sid}/overlay/{z}.png  AB/MC/implant overlay for slice z
+  GET    /api/session/{sid}/layers          napari-style layer list + defaults
+  GET    /api/session/{sid}/layer/{k}/raw    one layer as a uint8 brick for the GPU
   GET    /api/plants                        implant database
   POST   /api/plants                        add row
   PUT    /api/plants/{id}                   update row
@@ -23,20 +25,17 @@ Endpoints
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
 import shutil
 import threading
-import time
 import uuid
 
 # ---- OpenMP / MKL crash fix (MANDATORY on some platforms, same as desktop app) ----
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -106,6 +105,15 @@ class Session:
             "applied": None,
         }
         self._clf_model = None
+        self._vol_cache = {}                      # (kind, max_side) -> (bytes, dims, range)
+
+    def invalidate_volumes(self, *kinds):
+        """Drop cached 3D textures. No argument clears every layer."""
+        if not kinds:
+            self._vol_cache.clear()
+            return
+        for key in [k for k in self._vol_cache if k[0] in kinds]:
+            self._vol_cache.pop(key, None)
 
     # -- volume access
     def original_npy(self):
@@ -163,12 +171,43 @@ class Session:
         except Exception:
             pass
 
+def _py(v):
+    """numpy scalars -> plain Python, so the state stays JSON-serialisable."""
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, (list, tuple)):
+        return [_py(x) for x in v]
+    return v
+
 SESSIONS = {}
 
+_SID_RE = re.compile(r"[0-9a-f]{12}")
+
+def _revive_session(sid):
+    """Rebuild a session the process lost on restart.
+
+    Sessions live in memory, so a backend restart used to orphan every sid the
+    browser still held. Uploaded volumes and their saved state are on disk under
+    WORK_ROOT, so they can be brought back; sessions opened from an arbitrary
+    server path cannot, and still 404.
+    """
+    if not sid or not _SID_RE.fullmatch(sid):
+        return None
+    d_side = os.path.join(WORK_ROOT, sid, "d_side_volume")
+    if not os.path.isfile(os.path.join(d_side, "side_volume.npy")):
+        return None
+    s = Session(sid, d_side)
+    s.load_state()
+    if s.state.get("status") == "running":
+        s.state.update(status="error", progress=0.0,
+                       message="interrupted by a server restart — run the pipeline again")
+    SESSIONS[sid] = s
+    return s
+
 def get_session(sid):
-    s = SESSIONS.get(sid)
+    s = SESSIONS.get(sid) or _revive_session(sid)
     if s is None:
-        raise HTTPException(404, "unknown session")
+        raise HTTPException(404, "unknown session — reload the volume to start a new one")
     return s
 
 # ------------------------------------------------------------------- models
@@ -293,28 +332,90 @@ def delete_session(sid: str):
 def slice_png(sid: str, z: int):
     return Response(content=get_session(sid).slice_png(z), media_type="image/png")
 
-@app.get("/api/session/{sid}/volume-raw")
-def volume_raw(sid: str, max_side: int = 96):
-    """Whole volume as raw uint8 for the 3D ray-marcher.
-    Downscaled so the largest axis is <= max_side (keeps payload ~1 MB)."""
-    vol = get_session(sid).volume()
+# ------------------------------------------------------- napari-style layers
+# draw order matches _show_final_results_in_napari: base, AB, implant, MC
+LAYER_KINDS = ("base", "ab", "implant", "mc")
+LAYER_META = {
+    # kind      display name          the exact napari defaults main46.py sets
+    "base":    dict(name="CBCT",           colormap="magma",  rendering="mip",
+                    blending="additive",    opacity=1.0),
+    "ab":      dict(name="final_AB",       colormap="red",    rendering="iso",
+                    blending="translucent", opacity=1.0, iso=0.99),
+    "implant": dict(name="final_implant",  colormap="green",  rendering="iso",
+                    blending="translucent", opacity=1.0, iso=0.5),
+    "mc":      dict(name="final_MC",       colormap="yellow", rendering="iso",
+                    blending="translucent", opacity=1.0, iso=0.99),
+}
+
+def _encode_volume(vol, max_side):
+    """(bytes, (w,h,d), (data_min, data_max)) — uint8 R8 payload for a 3D texture.
+
+    Values are min/max normalised so the shader can map contrast limits that
+    the UI still expresses in the *original* data units (like napari does).
+    """
     vol = np.asarray(vol, dtype=np.float32)
     z, y, x = vol.shape
-    f = max_side / float(max(z, y, x))
-    if f < 1.0:
+    biggest = max(z, y, x)
+    if max_side > 0 and biggest > max_side:
+        f = max_side / float(biggest)
         vol = ndi.zoom(vol, zoom=(f, f, f), order=1)
-    # robust normalization: min .. 99th percentile
     lo = float(vol.min())
-    hi = np.percentile(vol, 99)
+    hi = float(vol.max())
     if hi <= lo:
         hi = lo + 1.0
-    vol = np.clip((vol - lo) / (hi - lo), 0.0, 1.0)
-    buf = (vol * 255.0).round().astype(np.uint8).tobytes()
-    dims = f"{vol.shape[2]},{vol.shape[1]},{vol.shape[0]}"   # w,h,d for Data3DTexture
+    norm = np.clip((vol - lo) / (hi - lo), 0.0, 1.0)
+    buf = (norm * 255.0).round().astype(np.uint8).tobytes()
+    # Data3DTexture wants width,height,depth = X,Y,Z
+    return buf, (int(vol.shape[2]), int(vol.shape[1]), int(vol.shape[0])), (lo, hi)
+
+def _layer_volume(s: "Session", kind: str):
+    """Raw ndarray for one layer, or None when that layer does not exist yet."""
+    if kind == "base":
+        return s.volume()
+    total = int(s.volume().shape[0])
+    return engine.build_label_volume(s.patient_dir, kind, total)
+
+@app.get("/api/session/{sid}/layers")
+def list_layers(sid: str):
+    """Which napari layers this session can currently show, in draw order."""
+    s = get_session(sid)
+    vol = s.volume()
+    out = []
+    for kind in LAYER_KINDS:
+        meta = dict(LAYER_META[kind])
+        meta["kind"] = kind
+        meta["available"] = True if kind == "base" else engine.mask_available(s.patient_dir, kind)
+        out.append(meta)
+    return {"layers": out, "shape": list(vol.shape), "slices": int(vol.shape[0])}
+
+@app.get("/api/session/{sid}/layer/{kind}/raw")
+def layer_raw(sid: str, kind: str, max_side: int = 192):
+    """One layer as a raw uint8 brick for the GPU ray-marcher."""
+    if kind not in LAYER_KINDS:
+        raise HTTPException(404, f"unknown layer '{kind}'")
+    max_side = max(32, min(int(max_side), 320))
+    s = get_session(sid)
+    key = (kind, max_side)
+    hit = s._vol_cache.get(key)
+    if hit is None:
+        vol = _layer_volume(s, kind)
+        if vol is None:
+            raise HTTPException(404, f"layer '{kind}' has not been produced yet")
+        hit = _encode_volume(vol, max_side)
+        s._vol_cache[key] = hit
+    buf, (w, h, d), (lo, hi) = hit
     return Response(
         content=buf,
         media_type="application/octet-stream",
-        headers={"X-Vol-Dims": dims, "Access-Control-Expose-Headers": "X-Vol-Dims"})
+        headers={"X-Vol-Dims": f"{w},{h},{d}",
+                 "X-Vol-Range": f"{lo:.6g},{hi:.6g}",
+                 "X-Vol-Kind": kind,
+                 "Access-Control-Expose-Headers": "X-Vol-Dims, X-Vol-Range, X-Vol-Kind"})
+
+@app.get("/api/session/{sid}/volume-raw")
+def volume_raw(sid: str, max_side: int = 192):
+    """Back-compat alias for the base CBCT layer."""
+    return layer_raw(sid, "base", max_side)
 
 @app.post("/api/session/{sid}/rotate")
 def rotate(sid: str, body: RotateIn):
@@ -333,6 +434,7 @@ def rotate(sid: str, body: RotateIn):
             if rotated.ndim != 3:
                 raise HTTPException(400, "rotation produced non-3D output")
             np.save(s.rotated_npy(), rotated)
+            s.invalidate_volumes()
             # cleanup exported slice folders the desktop app would have made
             for sub in ("tab7_slices",):
                 p = os.path.join(s.patient_dir, sub)
@@ -361,6 +463,7 @@ def reset_rotation(sid: str):
             os.remove(p)
         s.state["volume_source"] = "original"
         s.state["rotations"] = []
+        s.invalidate_volumes()
         vol = s.volume()
         s.state["missing_start"] = 0
         s.state["missing_end"] = int(vol.shape[0]) - 1
@@ -442,7 +545,8 @@ def run_pipeline(sid: str):
                 os.path.join(s.patient_dir, "segmented_MC"),
                 int(start), int(end), imps)
 
-            s.state["candidates"] = [list(c) for c in result["candidates"]]
+            s.invalidate_volumes("ab", "mc", "implant")
+            s.state["candidates"] = [_py(list(c)) for c in result["candidates"]]
             s.state["logs"] = result["logs"]
             s.state["no_implant_reason"] = result["no_implant_reason"]
 
@@ -455,7 +559,7 @@ def run_pipeline(sid: str):
                     s.patient_dir, chosen, int(start), resolution, Z,
                     ab_dir=os.path.join(s.patient_dir, "segmented_AB"),
                     mc_dir=os.path.join(s.patient_dir, "segmented_MC"))
-                s.state["applied"] = out["applied"]
+                s.state["applied"] = {k: _py(v) for k, v in out["applied"].items()}
 
             s.state.update(status="done", progress=1.0, message="pipeline complete")
         except Exception as e:
@@ -482,7 +586,8 @@ def apply_implant(sid: str, body: ApplyIn):
                 s.patient_dir, tuple(cands[body.index]), start, resolution, Z,
                 ab_dir=os.path.join(s.patient_dir, "segmented_AB"),
                 mc_dir=os.path.join(s.patient_dir, "segmented_MC"))
-            s.state["applied"] = out["applied"]
+            s.invalidate_volumes("implant")
+            s.state["applied"] = {k: _py(v) for k, v in out["applied"].items()}
             s.save_state()
             return {"ok": True, "applied": out["applied"]}
         except Exception as e:

@@ -34,68 +34,159 @@
   </nav>
 
   <div class="header-actions">
+    <button class="icon-btn" id="btnToggleDock" title="Show / hide the layer dock" aria-label="toggle layer dock">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="12" y="4" width="9" height="16" rx="1.5"/>
+      </svg>
+    </button>
     <span class="system-state"><span class="system-state-dot"></span>Local workspace</span>
   </div>
 </header>
 
-<main class="app-main">
-  <!-- ============ LEFT: workspace / viewer ============ -->
-  <section class="workspace" aria-label="workspace">
+<main class="app-main" id="appMain">
+
+  <!-- ============ LEFT: napari-style layer dock ============ -->
+  <aside class="dock" id="dock" aria-label="layer dock">
+    <div class="dock-scroll">
+
+      <section class="dock-section">
+        <div class="dock-head">
+          <h3>layer list</h3>
+          <span class="dock-hint" id="dockCount">0</span>
+        </div>
+        <ul class="layer-list" id="layerList">
+          <li class="layer-empty">No volume loaded yet.</li>
+        </ul>
+      </section>
+
+      <section class="dock-section dock-controls" id="layerControls" hidden>
+        <div class="dock-head">
+          <h3>layer controls</h3>
+          <span class="dock-hint mono" id="lcName">—</span>
+        </div>
+
+        <label class="lc-row">
+          <span class="lc-label">opacity</span>
+          <input id="lcOpacity" class="slider" type="range" min="0" max="100" step="1" />
+          <output class="lc-out mono" id="lcOpacityOut">1.00</output>
+        </label>
+
+        <label class="lc-row">
+          <span class="lc-label">contrast limits</span>
+          <div class="dual" id="lcClimWrap">
+            <input id="lcClimLo" class="slider slider-dual" type="range" min="0" max="1000" step="1" aria-label="contrast minimum" />
+            <input id="lcClimHi" class="slider slider-dual" type="range" min="0" max="1000" step="1" aria-label="contrast maximum" />
+          </div>
+          <output class="lc-out mono" id="lcClimOut">0 – 1</output>
+        </label>
+
+        <label class="lc-row">
+          <span class="lc-label">gamma</span>
+          <input id="lcGamma" class="slider" type="range" min="10" max="500" step="1" />
+          <output class="lc-out mono" id="lcGammaOut">1.00</output>
+        </label>
+
+        <label class="lc-row lc-row-select">
+          <span class="lc-label">colormap</span>
+          <select id="lcColormap" class="input input-sm"></select>
+          <span class="cmap-bar" id="lcColormapBar" aria-hidden="true"></span>
+        </label>
+
+        <label class="lc-row lc-row-select">
+          <span class="lc-label">blending</span>
+          <select id="lcBlending" class="input input-sm"></select>
+        </label>
+
+        <label class="lc-row lc-row-select lc-3d" id="lcRenderingRow">
+          <span class="lc-label">rendering</span>
+          <select id="lcRendering" class="input input-sm"></select>
+        </label>
+
+        <label class="lc-row lc-3d" id="lcIsoRow">
+          <span class="lc-label">iso threshold</span>
+          <input id="lcIso" class="slider" type="range" min="0" max="100" step="1" />
+          <output class="lc-out mono" id="lcIsoOut">0.50</output>
+        </label>
+
+        <label class="lc-row lc-3d" id="lcAttenRow">
+          <span class="lc-label">attenuation</span>
+          <input id="lcAtten" class="slider" type="range" min="1" max="60" step="1" />
+          <output class="lc-out mono" id="lcAttenOut">0.05</output>
+        </label>
+
+        <p class="lc-note" id="lc2dNote" hidden>
+          Rendering, iso threshold and attenuation apply to the 3D view only.
+        </p>
+      </section>
+
+    </div>
+  </aside>
+
+  <!-- ============ CENTER: napari canvas ============ -->
+  <section class="workspace" aria-label="viewer">
     <div class="workspace-toolbar">
       <div class="toolbar-left">
-        <span class="viewer-title">CBCT Viewer</span>
+        <div class="seg" role="tablist" aria-label="dimensions displayed">
+          <button class="seg-btn" id="btnNd2" title="2D slice view (ndisplay = 2)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+            2D
+          </button>
+          <button class="seg-btn is-active" id="btnNd3" title="3D volume view (ndisplay = 3)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21 4 16.5v-9L12 3Zm0 0v18M4 7.5l8 4.5 8-4.5"/></svg>
+            3D
+          </button>
+        </div>
         <span class="pill pill-ghost" id="patientPill" title="">no session</span>
       </div>
       <div class="toolbar-right">
-        <label class="toolbar-label">Slice
-          <input id="sliceSlider" type="range" min="0" max="10" value="0" aria-label="slice" />
+        <label class="toolbar-label" title="Volume sampling resolution sent to the GPU">
+          <small>quality</small>
+          <select id="volQuality" class="input input-sm">
+            <option value="96">low</option>
+            <option value="160">medium</option>
+            <option value="256" selected>full</option>
+          </select>
         </label>
-        <span class="mono" id="sliceLabel">— / —</span>
-        <div class="seg" role="tablist" aria-label="viewer mode">
-          <button class="seg-btn is-active" data-view="base" title="Base CBCT (2D slice)">2D</button>
-          <button class="seg-btn" data-view="overlay" title="AB / MC / implant overlay (2D)">Overlay</button>
-          <button class="seg-btn" id="btn2d3d" title="Free-orbit 3D rendering">3D</button>
-        </div>
-        <label class="chk" title="Show overlay on top of base instead of replacing it">
-          <input id="chkBlend" type="checkbox" /> <span>Blend</span>
-        </label>
-        <span class="toolbar-3d" id="ctl3dThreshold">
-          <small>Threshold</small>
-          <input id="volThreshold" type="range" min="5" max="85" value="28" step="1" />
-        </span>
-        <span class="toolbar-3d" id="ctl3dOpacity">
-          <small>Opacity</small>
-          <input id="volOpacity" type="range" min="2" max="25" value="9" step="1" />
-        </span>
+        <button class="icon-btn" id="btnResetView" title="Reset camera">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
+        </button>
+        <button class="icon-btn" id="btnShot" title="Save a PNG screenshot of the canvas">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 8h3l1.5-2h7L17 8h3v11H4Z"/><circle cx="12" cy="13" r="3.2"/></svg>
+        </button>
       </div>
     </div>
 
     <div class="viewer" id="viewer">
       <div class="viewer-stage">
-        <div class="img-stack" id="imgStack">
-          <img id="imgBase" class="img-base" alt="CBCT slice" />
-          <img id="imgOverlay" class="img-overlay" alt="AB / MC / implant" />
-        </div>
-        <div class="vol3d" id="vol3d" hidden></div>
+        <div class="napari-canvas" id="vol3d"></div>
 
         <div class="viewer-empty" id="viewerEmpty">
           <div class="empty-icon">
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path fill="none" stroke="currentColor" stroke-width="1.4"
-                d="M4 7h16M4 12h16M4 17h16"/>
-              <path fill="currentColor" opacity=".35"
-                d="M9 4v16M15 4v16" />
+              <path fill="none" stroke="currentColor" stroke-width="1.4" d="M4 7h16M4 12h16M4 17h16"/>
+              <path fill="currentColor" opacity=".35" d="M9 4v16M15 4v16" />
             </svg>
           </div>
-          <p>Load a patient folder to start</p>
-          <em>expects <span class="mono">d_side_volume/side_volume.npy</span> (produced by the desktop app)</em>
+          <p>Load a patient volume to start</p>
+          <em>expects <span class="mono">side_volume.npy</span> (produced by the desktop app)</em>
+        </div>
+
+        <div class="viewer-legend" id="legend" hidden>
+          <div class="legend-item"><span class="legend-swatch swatch-ab"></span>Alveolar bone</div>
+          <div class="legend-item"><span class="legend-swatch swatch-mc"></span>Mandibular canal</div>
+          <div class="legend-item"><span class="legend-swatch swatch-imp"></span>Implant (titanium)</div>
+          <div class="legend-item"><span class="legend-swatch swatch-range-start"></span>Range start</div>
+          <div class="legend-item"><span class="legend-swatch swatch-range-end"></span>Range end</div>
         </div>
       </div>
 
-      <div class="viewer-legend" id="legend">
-        <div class="legend-item"><span class="legend-swatch swatch-ab"></span>Alveolar bone</div>
-        <div class="legend-item"><span class="legend-swatch swatch-mc"></span>Mandibular canal</div>
-        <div class="legend-item"><span class="legend-swatch swatch-imp"></span>Implant candidate</div>
+      <div class="dims-bar" id="dimsBar">
+        <span class="dims-axis mono">axis&nbsp;0</span>
+        <div class="dims-slider-wrap">
+          <div class="dims-band" id="dimsBand" hidden title="missing-teeth range"></div>
+          <input id="sliceSlider" type="range" min="0" max="0" value="0" aria-label="slice" />
+        </div>
+        <span class="mono dims-value" id="sliceLabel">— / —</span>
       </div>
     </div>
 
@@ -165,7 +256,6 @@
           <span class="card-caption">Rotate the volume so the implant axis matches the CBCT plane</span>
         </header>
         <div class="card-body">
-
           <div class="row row-wrap">
             <div class="field">
               <span class="field-label">Angle (°)</span>
@@ -316,6 +406,6 @@
   { "imports": { "three": "./vendor/three.module.js" } }
 </script>
 <script type="module" src="vol3d.js"></script>
-<script src="app.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>
